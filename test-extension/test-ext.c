@@ -10,7 +10,6 @@ PG_FUNCTION_INFO_V1(get_int);
 
 Datum get_int(PG_FUNCTION_ARGS)
 {
-
     PG_RETURN_INT32(5);
 }
 
@@ -18,6 +17,5 @@ PG_FUNCTION_INFO_V1(get_float);
 
 Datum get_float(PG_FUNCTION_ARGS)
 {
-
     PG_RETURN_FLOAT8(5.0);
 }
