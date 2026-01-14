@@ -1,0 +1,4 @@
+comment = 'Test Ext 3'
+default_version = '0.0.1'
+relocatable = true
+module_pathname = '/var/lib/postgresql/test_ext-3/test3'
