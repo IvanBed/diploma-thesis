@@ -123,12 +123,11 @@ static bool encrypted_password_validate(char const *crypt_password, int password
         char *errstr = NULL;
         
         heap_deform_tuple(tup, RelationGetDescr(rel), values, isnull);
-        // Уточнить, можно ли так делать, если типа в таблице TEXT
+		
         plain_cur_password_text = DatumGetTextP(values[Anum_password_val - 1]);
         plain_cur_password = text_to_cstring(plain_cur_password_text);
         
-        //elog(NOTICE, "Cur passwords %s", plain_cur_password);
-        
+        //elog(NOTICE, "Cur passwords %s", plain_cur_password);       
 		// В силу того, что пользователь будет гененрить md5 пароль без соли, получаем чистый хеш
 		// Думаю можно добавить вариант с солью по юзер
         if (!pg_md5_encrypt(plain_cur_password, NULL, 0, plain_cur_password, &errstr))
@@ -152,7 +151,8 @@ static bool encrypted_password_validate(char const *crypt_password, int password
     return !encrypt_password_match;
 }
 
-// Проверить const!; Возможно добавить вызов стандартного хука
+// Проверить const
+//Возможно добавить вызов стандартного хука
 static void check_password(char const *username, char const *password, int password_type, Datum validuntil_time, bool validuntil_null)
 {
     if (password_type == PASSWORD_TYPE_PLAINTEXT)
@@ -167,7 +167,6 @@ static void check_password(char const *username, char const *password, int passw
     }
 }
 
-// Решить вопрос с файлом конфигурации
 void _PG_init()
 {
     define_min_size_passwd();
