@@ -130,7 +130,7 @@ static bool encrypted_password_validate(char const *crypt_password, int password
         //elog(NOTICE, "Cur passwords %s", plain_cur_password);       
 		// В силу того, что пользователь будет гененрить md5 пароль без соли, получаем чистый хеш
 		// Думаю можно добавить вариант с солью по юзер
-        if (!pg_md5_encrypt(plain_cur_password, NULL, 0, plain_cur_password, &errstr))
+        if (!pg_md5_encrypt(plain_cur_password, NULL, 0, crypt_cur_password, &errstr))
         {
             logdetail = errstr;
             continue;
