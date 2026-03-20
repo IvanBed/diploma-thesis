@@ -1,0 +1,38 @@
+FROM ubuntu:22.04 as build-stage
+
+RUN apt update -y && apt upgrade -y && apt install -y gcc make pkg-config libreadline-dev zlib1g-dev icu-devtools libicu-dev flex bison libxml2-utils
+
+RUN useradd postgres -d /var/local/lib/postgresql/ -s /bin/bash && mkdir -p /usr/local/pgsql/data && chown postgres /usr/local/pgsql/data
+
+COPY postgre /var/postgresql 
+COPY entrypoint.sh /var/postgresql
+COPY custom_executor /var/custom_executor
+
+WORKDIR /var/postgresql
+
+# Сборка postgres
+
+RUN ./configure --enable-debug --enable-cassert --enable-injection-points &&\
+        make &&\
+        #make check &&\
+        make install &&\
+        mkdir /var/log/postgresql && chown postgres /var/log/postgresql
+
+# Сборка custom_executor 
+
+WORKDIR /var/custom_executor
+
+RUN make USE_PGXS=1 &&\
+        make USE_PGXS=1 install
+
+USER postgres
+
+WORKDIR /var/postgresql
+
+EXPOSE 5432
+
+ENTRYPOINT ["./entrypoint.sh"] 
+
+
+    
+ 
