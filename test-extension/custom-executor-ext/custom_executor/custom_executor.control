@@ -1,0 +1,4 @@
+comment = 'Test Ext for executor'
+default_version = '0.0.1'
+relocatable = true
+module_pathname = '/var/custom_executor/custom_executor'

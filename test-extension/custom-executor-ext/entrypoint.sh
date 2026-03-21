@@ -16,7 +16,7 @@ PG_LOG_PATH="/var/log/postgresql/logfile"
 "$PG_BIN_PATH/psql" -c 'CREATE EXTENSION custom_executor;'
 
 
-$PG_BIN_PATH/pg_ctl" -D "$PG_BIN_DATA" -l "$PG_LOG_PATH" restart
+"$PG_BIN_PATH/pg_ctl" -D "$PG_BIN_DATA" -l "$PG_LOG_PATH" restart
 
 while true
 do

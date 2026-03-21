@@ -6,11 +6,11 @@
 
 #include "miscadmin.h"
 
-#include "nodes/nodetags.h"
+//#include "nodes/nodetags.h"
 #include "nodes/pg_list.h"
 
 #include "commands/explain.h"
-#include "executor/executor.h"
+//#include "executor/executor.h"
 
 #include <string.h>
 #include <stdint.h>
@@ -25,6 +25,8 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static explain_per_node_hook_type prev_explain_per_node_hook = NULL;
 
 static int level = 0;
+static int plan_level = 0;
+
 
 static void print_log_type_of_query(CmdType cur_type)
 {
@@ -57,6 +59,29 @@ static void print_log_type_of_query(CmdType cur_type)
     }    
 }
 
+static void dfs_plan_state(PlanState *node, int level)
+{
+    if (!node)
+        return;
+    
+    elog(NOTICE, "level: %d", level);
+
+    if (node->need_timer)
+        elog(NOTICE, "need_timer ---> TRUE");
+    else 
+        elog(NOTICE, "need_timer ---> FALSE");
+           
+    Instrumentation *cur_instr = node->instrument;
+    
+    if (cur_instr)
+        elog(NOTICE, "tuple count: %f", cur_instr->ntuples);
+    else 
+        elog(NOTICE, "Instrumentation is NULL!!!");
+    level++;
+    dfs_plan_state(node->lefttree, level);
+    dfs_plan_state(node->righttree, level);
+}
+
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
     if (prev_ExecutorStart)
@@ -67,7 +92,7 @@ static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
     //elog(NOTICE, "custom_ExecutorStart is started, level of subquery is: %d", level);
 }
 
-static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
+static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 {
     if (prev_ExecutorRun)
         prev_ExecutorRun(queryDesc, direction, count, execute_once);
@@ -102,15 +127,14 @@ static void custom_ExecutorEnd(QueryDesc *queryDesc)
     elog(NOTICE, "custom_ExecutorEnd is started, level of subquery is: %d", level);
 }
 
-static void custom_per_node_hook(PlanState *planstate, List *ancestors, const char *relationship, const char *plan_name, ExplainState *es)
+static void custom_per_node_hook(PlanState *planstate, List *ancestors, const char *relationship, const char *plan_name, struct ExplainState *es)
 {
-    
+    plan_level++;
     if (prev_explain_per_node_hook)
         prev_explain_per_node_hook(planstate, ancestors, relationship,plan_name, es);
 
-    
-    elog(NOTICE, "custom_per_node_hook is started, current plan name is %s", plan_name);
-    elog(NOTICE, "custom_per_node_hook is started, string info is %s", es->str);
+    elog(NOTICE, "custom_per_node_hook is started, current plan name is %s, plan level is %d", plan_name, plan_level);
+    //elog(NOTICE, "custom_per_node_hook is started, string info is %s", es->str);
 }
 
 void _PG_init()
