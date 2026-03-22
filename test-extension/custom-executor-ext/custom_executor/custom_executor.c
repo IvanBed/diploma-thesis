@@ -6,7 +6,7 @@
 
 #include "miscadmin.h"
 
-//#include "nodes/nodetags.h"
+
 #include "nodes/pg_list.h"
 
 #include "commands/explain.h"
@@ -59,37 +59,70 @@ static void print_log_type_of_query(CmdType cur_type)
     }    
 }
 
+static void print_node_name(NodeTag tag)
+{
+    switch(tag)
+    {
+        case T_MergeJoinState:
+            elog(NOTICE, "Node tag: MergeJoin");
+            break;
+        case T_SortState:
+            elog(NOTICE, "Node tag: Sort");
+            break;        
+        case T_SeqScanState:
+            elog(NOTICE, "Node tag: Seq Scan");
+            break;            
+        default:
+            elog(NOTICE, "Node tag: Unknown");
+            break; 
+    }
+}
+
 static void dfs_plan_state(PlanState *node, int level)
 {
     if (!node)
         return;
-    
-    elog(NOTICE, "level: %d", level);
 
-    if (node->need_timer)
-        elog(NOTICE, "need_timer ---> TRUE");
-    else 
-        elog(NOTICE, "need_timer ---> FALSE");
-           
-    Instrumentation *cur_instr = node->instrument;
-    
+    elog(NOTICE, "level: %d", level);
+     
+    print_node_name(node->type);
+
+    Instrumentation *cur_instr  = node->instrument;
+
     if (cur_instr)
-        elog(NOTICE, "tuple count: %f", cur_instr->ntuples);
+    {
+        elog(NOTICE, "Total tuples emitted so far the current node cycle: %f", cur_instr->tuplecount);
+        elog(NOTICE, "Nanoseconds spent on the current node cycle: %ld", INSTR_TIME_GET_NANOSEC(cur_instr->counter));
+    }
     else 
-        elog(NOTICE, "Instrumentation is NULL!!!");
+    {
+        elog(NOTICE, "Instrumentation is not init");
+    }
+
+    EState *cur_estatr  = node->state;
+    if (cur_estatr)
+        elog(NOTICE, "Source row: %s", cur_estatr->es_sourceText);
+    else
+        elog(NOTICE, "EState is NULL");
+
     level++;
     dfs_plan_state(node->lefttree, level);
     dfs_plan_state(node->righttree, level);
 }
 
+
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+    queryDesc->instrument_options |= INSTRUMENT_TIMER; 
+    queryDesc->instrument_options |= INSTRUMENT_BUFFERS; 
+    queryDesc->instrument_options |= INSTRUMENT_ROWS; 
+    queryDesc->instrument_options |= INSTRUMENT_WAL; 
+
     if (prev_ExecutorStart)
         prev_ExecutorStart(queryDesc, eflags);
     else 
         standard_ExecutorStart(queryDesc, eflags);    
     
-    //elog(NOTICE, "custom_ExecutorStart is started, level of subquery is: %d", level);
 }
 
 static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
@@ -99,8 +132,6 @@ static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, ui
     else 
         standard_ExecutorRun(queryDesc, direction, count, execute_once);
     
-    //elog(NOTICE, "custom_ExecutorRun is started, level of subquery is: %d", level);
-    //elog(NOTICE, "Query text: %s", (char *) queryDesc->sourceText);
     print_log_type_of_query(queryDesc->operation);
     level++;
 }
@@ -112,8 +143,7 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     else 
         standard_ExecutorFinish(queryDesc);
     
-    //elog(NOTICE, "custom_ExecutorFinish is started, level of subquery is: %d", level);
-    //elog(NOTICE, "Query text: %s", (char *) queryDesc->sourceText);
+    dfs_plan_state(queryDesc->planstate, 0;
     level++;
 }
 
@@ -123,8 +153,8 @@ static void custom_ExecutorEnd(QueryDesc *queryDesc)
         prev_ExecutorEnd(queryDesc);
     else 
         standard_ExecutorEnd(queryDesc);
-    
-    elog(NOTICE, "custom_ExecutorEnd is started, level of subquery is: %d", level);
+
+
 }
 
 static void custom_per_node_hook(PlanState *planstate, List *ancestors, const char *relationship, const char *plan_name, struct ExplainState *es)
@@ -133,7 +163,7 @@ static void custom_per_node_hook(PlanState *planstate, List *ancestors, const ch
     if (prev_explain_per_node_hook)
         prev_explain_per_node_hook(planstate, ancestors, relationship,plan_name, es);
 
-    elog(NOTICE, "custom_per_node_hook is started, current plan name is %s, plan level is %d", plan_name, plan_level);
+    //elog(NOTICE, "custom_per_node_hook is started, current plan name is %s, plan level is %d", plan_name, plan_level);
     //elog(NOTICE, "custom_per_node_hook is started, string info is %s", es->str);
 }
 
