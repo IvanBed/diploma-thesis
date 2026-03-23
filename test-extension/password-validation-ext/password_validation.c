@@ -142,6 +142,8 @@ static bool encrypted_password_validate(char const *crypt_password, int password
             encrypt_password_match = true;
             break;
         }
+		// Явно освобождаем память, чтобы не копить в цикле
+		pfree(plain_cur_password);
                      
     }
     //elog(NOTICE, "Crypt passwords %s  ", crypt_password);
