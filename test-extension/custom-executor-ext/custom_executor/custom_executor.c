@@ -5,11 +5,9 @@
 #include "utils/guc.h"
 
 #include "miscadmin.h"
-
-
 #include "nodes/pg_list.h"
-
 #include "commands/explain.h"
+#include <access/xact.h>
 //#include "executor/executor.h"
 
 #include <string.h>
@@ -22,10 +20,6 @@ static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
-static explain_per_node_hook_type prev_explain_per_node_hook = NULL;
-
-static int level = 0;
-static int plan_level = 0;
 
 
 static void print_log_type_of_query(CmdType cur_type)
@@ -71,7 +65,27 @@ static void print_node_name(NodeTag tag)
             break;        
         case T_SeqScanState:
             elog(NOTICE, "Node tag: Seq Scan");
-            break;            
+            break;  
+        case T_NestLoopState:
+            elog(NOTICE, "Node tag: Nest Loop");
+            break;
+        case T_HashJoinState:
+            elog(NOTICE, "Node tag: Hash Join");
+            break;                
+        case T_AggState:
+            elog(NOTICE, "Node tag: Aggregate");
+            break;    
+        case T_HashState:
+            elog(NOTICE, "Node tag: Hash");
+            break;
+        case T_ValuesScanState:
+            elog(NOTICE, "Node tag: Values Scan");
+            break;
+            
+        case T_ModifyTableState:
+            elog(NOTICE, "Node tag: Modify Table");
+            break;
+            
         default:
             elog(NOTICE, "Node tag: Unknown");
             break; 
@@ -83,27 +97,31 @@ static void dfs_plan_state(PlanState *node, int level)
     if (!node)
         return;
 
-    elog(NOTICE, "level: %d", level);
-     
+    elog(NOTICE, "Nesting level of plane node: %d", level);
+    
+    elog(NOTICE, "Node type: %d", node->type);
     print_node_name(node->type);
 
-    Instrumentation *cur_instr  = node->instrument;
+    Instrumentation *per_node_info  = node->instrument;
 
-    if (cur_instr)
+    if (per_node_info)
     {
-        elog(NOTICE, "Total tuples emitted so far the current node cycle: %f", cur_instr->tuplecount);
-        elog(NOTICE, "Nanoseconds spent on the current node cycle: %ld", INSTR_TIME_GET_NANOSEC(cur_instr->counter));
+        elog(NOTICE, "-------------------------Main info--------------------------------------------");
+        //elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
+        elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
+        //elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
+        //elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_read_time));
+        //elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_write_time));
+        //elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_read_time));
+        //elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_write_time));
+        elog(NOTICE, "-------------------------WAL usage info---------------------------------------");
+        elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
+        
     }
     else 
     {
         elog(NOTICE, "Instrumentation is not init");
     }
-
-    EState *cur_estatr  = node->state;
-    if (cur_estatr)
-        elog(NOTICE, "Source row: %s", cur_estatr->es_sourceText);
-    else
-        elog(NOTICE, "EState is NULL");
 
     level++;
     dfs_plan_state(node->lefttree, level);
@@ -113,19 +131,30 @@ static void dfs_plan_state(PlanState *node, int level)
 
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-    queryDesc->instrument_options |= INSTRUMENT_TIMER; 
-    queryDesc->instrument_options |= INSTRUMENT_BUFFERS; 
+    queryDesc->instrument_options |= INSTRUMENT_ALL; 
+    
+    /*queryDesc->instrument_options |= INSTRUMENT_BUFFERS; 
     queryDesc->instrument_options |= INSTRUMENT_ROWS; 
-    queryDesc->instrument_options |= INSTRUMENT_WAL; 
-
+    queryDesc->instrument_options |= INSTRUMENT_WAL; */
+    
+    TransactionId xid = GetCurrentTransactionId();
+    elog(NOTICE, "Transaction id: %d", xid);
+    
     if (prev_ExecutorStart)
         prev_ExecutorStart(queryDesc, eflags);
     else 
         standard_ExecutorStart(queryDesc, eflags);    
-    
+        
+    if (queryDesc->totaltime == NULL)
+    {
+        MemoryContext oldcxt;
+        oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
+        queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
+        MemoryContextSwitchTo(oldcxt);
+    }
 }
 
-static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
 {
     if (prev_ExecutorRun)
         prev_ExecutorRun(queryDesc, direction, count, execute_once);
@@ -133,7 +162,6 @@ static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, ui
         standard_ExecutorRun(queryDesc, direction, count, execute_once);
     
     print_log_type_of_query(queryDesc->operation);
-    level++;
 }
 
 static  void custom_ExecutorFinish(QueryDesc *queryDesc)
@@ -143,8 +171,15 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     else 
         standard_ExecutorFinish(queryDesc);
     
-    dfs_plan_state(queryDesc->planstate, 0;
-    level++;
+    InstrEndLoop(queryDesc->totaltime);
+    
+    if (queryDesc->totaltime)
+    {
+        elog(NOTICE, "Time spent to execute the query: %f seconds", queryDesc->totaltime->total);
+    }
+    
+    dfs_plan_state(queryDesc->planstate, 0);
+    
 }
 
 static void custom_ExecutorEnd(QueryDesc *queryDesc)
@@ -153,18 +188,6 @@ static void custom_ExecutorEnd(QueryDesc *queryDesc)
         prev_ExecutorEnd(queryDesc);
     else 
         standard_ExecutorEnd(queryDesc);
-
-
-}
-
-static void custom_per_node_hook(PlanState *planstate, List *ancestors, const char *relationship, const char *plan_name, struct ExplainState *es)
-{
-    plan_level++;
-    if (prev_explain_per_node_hook)
-        prev_explain_per_node_hook(planstate, ancestors, relationship,plan_name, es);
-
-    //elog(NOTICE, "custom_per_node_hook is started, current plan name is %s, plan level is %d", plan_name, plan_level);
-    //elog(NOTICE, "custom_per_node_hook is started, string info is %s", es->str);
 }
 
 void _PG_init()
@@ -184,8 +207,5 @@ void _PG_init()
 
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = custom_ExecutorEnd;
-
-    prev_explain_per_node_hook = explain_per_node_hook;
-    explain_per_node_hook = custom_per_node_hook;
 
 }
