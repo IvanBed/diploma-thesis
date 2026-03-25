@@ -3,11 +3,13 @@
 
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/rel.h"
 
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "commands/explain.h"
 #include <access/xact.h>
+#include "tcop/utility.h"
 //#include "executor/executor.h"
 
 #include <string.h>
@@ -20,7 +22,7 @@ static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
-
+static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 static void print_log_type_of_query(CmdType cur_type)
 {
@@ -92,6 +94,24 @@ static void print_node_name(NodeTag tag)
     }
 }
 
+
+static void print_lock_info(QueryDesc *queryDesc)
+{
+	//EState *estate;
+	//Relation *ces_relations;
+	
+	if (!queryDesc->estate || !queryDesc->estate->es_relations)
+	{
+		elog(NOTICE, "!queryDesc->estate || !queryDesc->estate->cur_es_relations"); 
+        return;
+	}
+	Relation *relations_arr = queryDesc->estate->es_relations;
+	for (size_t i = 0 ; i < 1; i++)
+	{
+        elog(NOTICE, "Lock id: %d %d", relations_arr[i]->rd_lockInfo.lockRelId.relId, relations_arr[i]->rd_lockInfo.lockRelId.dbId);
+	}
+}
+
 static void dfs_plan_state(PlanState *node, int level)
 {
     if (!node)
@@ -109,14 +129,17 @@ static void dfs_plan_state(PlanState *node, int level)
         elog(NOTICE, "-------------------------Main info--------------------------------------------");
         //elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
         elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
-        //elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
-        //elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_read_time));
-        //elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_write_time));
-        //elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_read_time));
-        //elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_write_time));
-        elog(NOTICE, "-------------------------WAL usage info---------------------------------------");
+        elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
+        /*elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_read_time));
+        elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_write_time));
+        elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_read_time));
+        elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_write_time));
+        */elog(NOTICE, "-------------------------WAL usage info---------------------------------------");
         elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
-        
+/*        elog(NOTICE, "-------------------------Add usage info---------------------------------------");    
+		elog(NOTICE, "need_timer: %ld", per_node_info->need_timer);
+		elog(NOTICE, "need_bufusage: %ld", per_node_info->need_bufusage);
+		elog(NOTICE, "need_walusage: %ld", per_node_info->need_walusage);*/
     }
     else 
     {
@@ -132,11 +155,7 @@ static void dfs_plan_state(PlanState *node, int level)
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
     queryDesc->instrument_options |= INSTRUMENT_ALL; 
-    
-    /*queryDesc->instrument_options |= INSTRUMENT_BUFFERS; 
-    queryDesc->instrument_options |= INSTRUMENT_ROWS; 
-    queryDesc->instrument_options |= INSTRUMENT_WAL; */
-    
+
     TransactionId xid = GetCurrentTransactionId();
     elog(NOTICE, "Transaction id: %d", xid);
     
@@ -179,6 +198,7 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     }
     
     dfs_plan_state(queryDesc->planstate, 0);
+	print_lock_info(queryDesc);
     
 }
 
@@ -188,6 +208,18 @@ static void custom_ExecutorEnd(QueryDesc *queryDesc)
         prev_ExecutorEnd(queryDesc);
     else 
         standard_ExecutorEnd(queryDesc);
+}
+
+static void custom_ProcessUtility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree, ProcessUtilityContext context, ParamListInfo params, 
+                    QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc)
+{
+	if (prev_ProcessUtility)
+	    prev_ProcessUtility(pstmt, queryString,readOnlyTree, context, params, queryEnv, dest, qc);
+    else
+	    standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+	
+	elog(NOTICE, "TEST custom_ProcessUtility %s", queryString);
+	
 }
 
 void _PG_init()
@@ -207,5 +239,7 @@ void _PG_init()
 
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = custom_ExecutorEnd;
-
+    
+	prev_ProcessUtility = ProcessUtility_hook;
+	ProcessUtility_hook = custom_ProcessUtility;
 }
