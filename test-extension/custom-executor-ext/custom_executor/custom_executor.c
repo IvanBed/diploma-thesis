@@ -10,19 +10,35 @@
 #include "commands/explain.h"
 #include <access/xact.h>
 #include "tcop/utility.h"
+#include "storage/lock.h"
+#include "datatype/timestamp.h"
 //#include "executor/executor.h"
 
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
 
+#define EXECUTOR_START  0
+#define EXECUTOR_FINISH 1
+
 PG_MODULE_MAGIC;
 
-static ExecutorStart_hook_type prev_ExecutorStart = NULL;
-static ExecutorRun_hook_type prev_ExecutorRun = NULL;
-static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
-static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
-static ProcessUtility_hook_type prev_ProcessUtility = NULL;
+
+struct LockInstanceDataWrapper
+{
+    LockData *lock_data;
+    bool reinit_flag;
+};
+
+typedef struct LockInstanceDataWrapper LockInstanceDataWrapper;
+
+static ExecutorStart_hook_type prev_ExecutorStart    = NULL;
+static ExecutorRun_hook_type prev_ExecutorRun        = NULL;
+static ExecutorFinish_hook_type prev_ExecutorFinish  = NULL;
+static ExecutorEnd_hook_type prev_ExecutorEnd        = NULL;
+static ProcessUtility_hook_type prev_ProcessUtility  = NULL;
+
+static LockInstanceDataWrapper  *lock_data_wrapper   = NULL;
 
 static void print_log_type_of_query(CmdType cur_type)
 {
@@ -94,22 +110,120 @@ static void print_node_name(NodeTag tag)
     }
 }
 
+static void print_lock_tag(LockTagType locktag_type)
+{
+    switch (locktag_type)
+    {
+        case LOCKTAG_RELATION:
+            elog(NOTICE, "LOCKTAG_RELATION");
+            break;
+        case LOCKTAG_RELATION_EXTEND:
+            elog(NOTICE, "LOCKTAG_RELATION_EXTEND");
+            break;
+        case LOCKTAG_DATABASE_FROZEN_IDS:
+            elog(NOTICE, "LOCKTAG_DATABASE_FROZEN_IDS");
+            break;
+        case LOCKTAG_PAGE:
+            elog(NOTICE, "LOCKTAG_PAGE");
+            break;
+        case LOCKTAG_TUPLE:
+            elog(NOTICE, "LOCKTAG_TUPLE");
+            break;
+        case LOCKTAG_TRANSACTION:
+            elog(NOTICE, "LOCKTAG_TRANSACTION");
+            break;
+        case LOCKTAG_VIRTUALTRANSACTION:
+            elog(NOTICE, "LOCKTAG_VIRTUALTRANSACTION");
+            break;
+        case LOCKTAG_SPECULATIVE_TOKEN:
+            elog(NOTICE, "LOCKTAG_SPECULATIVE_TOKEN");
+            break;
+        case LOCKTAG_APPLY_TRANSACTION:
+            elog(NOTICE, "LOCKTAG_APPLY_TRANSACTION");
+            break;
+        case LOCKTAG_OBJECT:
+            elog(NOTICE, "LOCKTAG_OBJECT");
+            break;
+        case LOCKTAG_USERLOCK:
+            elog(NOTICE, "LOCKTAG_USERLOCK");
+            break;        
+        case LOCKTAG_ADVISORY:
+            elog(NOTICE, "LOCKTAG_ADVISORY");
+            break;        
+        default:            /* treat unknown locktags like OBJECT */
+            elog(NOTICE, "UNKNOWN LOCKTAG");
+            break;
+    }
+}
+
+static void init_lock_info(QueryDesc *queryDesc)
+{    
+    lock_data_wrapper->lock_data = GetLockStatusData();
+    LockInstanceData *instance   = NULL;
+    
+    if (lock_data_wrapper->reinit_flag)
+    {
+        for (size_t i = 0; i < lock_data_wrapper->lock_data->nelements; i++)
+        {
+            instance = &(lock_data_wrapper->lock_data->locks[i]);
+            instance->waitStart = 0;
+        }
+        lock_data_wrapper->reinit_flag = false;
+    }
+}
 
 static void print_lock_info(QueryDesc *queryDesc)
 {
-	//EState *estate;
-	//Relation *ces_relations;
-	
-	if (!queryDesc->estate || !queryDesc->estate->es_relations)
-	{
-		elog(NOTICE, "!queryDesc->estate || !queryDesc->estate->cur_es_relations"); 
-        return;
-	}
-	Relation *relations_arr = queryDesc->estate->es_relations;
-	for (size_t i = 0 ; i < 1; i++)
-	{
-        elog(NOTICE, "Lock id: %d %d", relations_arr[i]->rd_lockInfo.lockRelId.relId, relations_arr[i]->rd_lockInfo.lockRelId.dbId);
-	}
+    LockInstanceData *instance  = NULL;
+    bool              granted   = false; 
+    LOCKMODE          mode      = 0;
+    
+    TimestampTz end_timestamp   = GetCurrentTimestamp();
+    
+    for (size_t i = 0; i < lock_data_wrapper->lock_data->nelements; i++)
+    {
+        instance = &(lock_data_wrapper->lock_data->locks[i]);
+        
+        if (instance->holdMask)
+        {
+            for (mode = 0; mode < MAX_LOCKMODES; mode++)
+            {
+                if (instance->holdMask & LOCKBIT_ON(mode))
+                {
+                    granted = true;
+                    instance->holdMask &= LOCKBIT_OFF(mode);
+                    break;
+                }
+            }
+        }
+        
+        if (!granted)
+        {
+            if (instance->waitLockMode != NoLock)
+            {
+                mode = instance->waitLockMode;
+            }
+            else
+            {
+                continue;
+            }
+        }
+        
+        print_lock_tag((LockTagType) instance->locktag.locktag_type); 
+        elog(NOTICE, "Proccess id: %d", instance->pid);
+        elog(NOTICE, "Lock name: %s",GetLockmodeName(instance->locktag.locktag_lockmethodid, mode));
+        elog(NOTICE, "database: %d",instance->locktag.locktag_field1);
+        elog(NOTICE, "relation: %d",instance->locktag.locktag_field2);
+        
+        if (instance->waitStart != 0)
+        {
+            elog(NOTICE, "end_timestamp: %ld", end_timestamp);
+            elog(NOTICE, "Lock time wait start: %ld", instance->waitStart);
+            elog(NOTICE, "Lock time activity: %ld", end_timestamp - instance->waitStart);
+            lock_data_wrapper->reinit_flag = true;
+        }    
+    }
+    
 }
 
 static void dfs_plan_state(PlanState *node, int level)
@@ -137,9 +251,9 @@ static void dfs_plan_state(PlanState *node, int level)
         */elog(NOTICE, "-------------------------WAL usage info---------------------------------------");
         elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
 /*        elog(NOTICE, "-------------------------Add usage info---------------------------------------");    
-		elog(NOTICE, "need_timer: %ld", per_node_info->need_timer);
-		elog(NOTICE, "need_bufusage: %ld", per_node_info->need_bufusage);
-		elog(NOTICE, "need_walusage: %ld", per_node_info->need_walusage);*/
+        elog(NOTICE, "need_timer: %ld", per_node_info->need_timer);
+        elog(NOTICE, "need_bufusage: %ld", per_node_info->need_bufusage);
+        elog(NOTICE, "need_walusage: %ld", per_node_info->need_walusage);*/
     }
     else 
     {
@@ -171,6 +285,9 @@ static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
         queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
         MemoryContextSwitchTo(oldcxt);
     }
+    
+    elog(NOTICE, "LOCK INFO AT STEP Executor Start", queryDesc->totaltime->total);
+    init_lock_info(queryDesc);
 }
 
 static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
@@ -198,12 +315,13 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     }
     
     dfs_plan_state(queryDesc->planstate, 0);
-	print_lock_info(queryDesc);
+    elog(NOTICE, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
+    print_lock_info(queryDesc);
     
 }
 
 static void custom_ExecutorEnd(QueryDesc *queryDesc)
-{
+{  
     if (prev_ExecutorEnd)
         prev_ExecutorEnd(queryDesc);
     else 
@@ -213,13 +331,20 @@ static void custom_ExecutorEnd(QueryDesc *queryDesc)
 static void custom_ProcessUtility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree, ProcessUtilityContext context, ParamListInfo params, 
                     QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc)
 {
-	if (prev_ProcessUtility)
-	    prev_ProcessUtility(pstmt, queryString,readOnlyTree, context, params, queryEnv, dest, qc);
+    if (prev_ProcessUtility)
+        prev_ProcessUtility(pstmt, queryString,readOnlyTree, context, params, queryEnv, dest, qc);
     else
-	    standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
-	
-	elog(NOTICE, "TEST custom_ProcessUtility %s", queryString);
-	
+        standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+    
+    elog(NOTICE, "TEST custom_ProcessUtility %s", queryString);
+    
+}
+
+static void init_lock_wrapper()
+{
+    lock_data_wrapper = (LockInstanceDataWrapper*) palloc(sizeof(LockInstanceDataWrapper));
+    lock_data_wrapper->lock_data   = NULL;
+    lock_data_wrapper->reinit_flag = false;
 }
 
 void _PG_init()
@@ -228,6 +353,8 @@ void _PG_init()
     if(!process_shared_preload_libraries_in_progress)
         elog(FATAL, "Please use shared_preload_libraries");
     
+    init_lock_wrapper();
+        
     prev_ExecutorStart = ExecutorStart_hook;
     ExecutorStart_hook = custom_ExecutorStart;
 
@@ -240,6 +367,6 @@ void _PG_init()
     prev_ExecutorEnd = ExecutorEnd_hook;
     ExecutorEnd_hook = custom_ExecutorEnd;
     
-	prev_ProcessUtility = ProcessUtility_hook;
-	ProcessUtility_hook = custom_ProcessUtility;
+    prev_ProcessUtility = ProcessUtility_hook;
+    ProcessUtility_hook = custom_ProcessUtility;
 }
