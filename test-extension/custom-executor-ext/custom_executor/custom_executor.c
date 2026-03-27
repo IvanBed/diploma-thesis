@@ -231,7 +231,7 @@ static void dfs_plan_state(PlanState *node, int level)
     if (!node)
         return;
 
-    elog(NOTICE, "Nesting level of plane node: %d", level);
+    //elog(NOTICE, "Nesting level of plane node: %d", level);
     
     elog(NOTICE, "Node type: %d", node->type);
     print_node_name(node->type);
@@ -240,20 +240,41 @@ static void dfs_plan_state(PlanState *node, int level)
 
     if (per_node_info)
     {
-        elog(NOTICE, "-------------------------Main info--------------------------------------------");
+        //elog(NOTICE, "-------------------------Main info--------------------------------------------");
         //elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
         elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
-        elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
-        /*elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_read_time));
-        elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.blk_write_time));
-        elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_read_time));
-        elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage_start.temp_blk_write_time));
-        */elog(NOTICE, "-------------------------WAL usage info---------------------------------------");
+        elog(NOTICE, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
+		
+		/*elog(NOTICE, "need_timer: %d", per_node_info->need_timer);
+		elog(NOTICE, "need_bufusage: %d", per_node_info->need_bufusage);
+		elog(NOTICE, "need_walusage: %d", per_node_info->need_walusage);*/
+		elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
+/*        elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_read_time));
+        elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_write_time));
+        elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_read_time));
+        elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_write_time));
+        
+		
+		elog(NOTICE, "Local block hits at the current node cycle: %ld", per_node_info->bufusage.local_blks_hit);
+        elog(NOTICE, "Local block reads at the current node cycle: %ld", per_node_info->bufusage.local_blks_read);
+		elog(NOTICE, "Local block dirtied at the current node cycle: %ld", per_node_info->bufusage.local_blks_dirtied);
+		elog(NOTICE, "Local block written at the current node cycle: %ld", per_node_info->bufusage.local_blks_written);	
+*/
+		/*elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit - per_node_info->bufusage_start.shared_blks_hit);
+        elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read  - per_node_info->bufusage_start.shared_blks_read);
+		elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied - per_node_info->bufusage_start.shared_blks_dirtied);
+		elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written - per_node_info->bufusage_start.shared_blks_written);	
+		*/
+		elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit);
+        elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read);
+		elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied);
+		elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written);	
+
+		
+	    /*elog(NOTICE, "-------------------------WAL PER NODE usage info---------------------------------------");
         elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
-/*        elog(NOTICE, "-------------------------Add usage info---------------------------------------");    
-        elog(NOTICE, "need_timer: %ld", per_node_info->need_timer);
-        elog(NOTICE, "need_bufusage: %ld", per_node_info->need_bufusage);
-        elog(NOTICE, "need_walusage: %ld", per_node_info->need_walusage);*/
+		elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
+        elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); */
     }
     else 
     {
@@ -266,10 +287,29 @@ static void dfs_plan_state(PlanState *node, int level)
 }
 
 
+void init_instr(PlanState *node)
+{
+	if (!node)
+        return;
+	
+	Instrumentation *per_node_info  = node->instrument;
+	per_node_info->need_timer       = true;
+	per_node_info->need_bufusage    = true;
+	per_node_info->need_walusage    = true;
+	
+	init_instr(node->lefttree);
+    init_instr(node->righttree);
+	
+}
+
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-    queryDesc->instrument_options |= INSTRUMENT_ALL; 
-
+    queryDesc->instrument_options |= INSTRUMENT_TIMER; 
+    queryDesc->instrument_options |= INSTRUMENT_BUFFERS;
+    queryDesc->instrument_options |= INSTRUMENT_ROWS;
+	queryDesc->instrument_options |= INSTRUMENT_WAL;
+	
+	
     TransactionId xid = GetCurrentTransactionId();
     elog(NOTICE, "Transaction id: %d", xid);
     
@@ -285,9 +325,9 @@ static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
         queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
         MemoryContextSwitchTo(oldcxt);
     }
-    
+     
     elog(NOTICE, "LOCK INFO AT STEP Executor Start", queryDesc->totaltime->total);
-    init_lock_info(queryDesc);
+    //init_lock_info(queryDesc);
 }
 
 static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
@@ -312,17 +352,27 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     if (queryDesc->totaltime)
     {
         elog(NOTICE, "Time spent to execute the query: %f seconds", queryDesc->totaltime->total);
+		/*elog(NOTICE, "-------------------------WAL PER Query usage info---------------------------------------");
+		elog(NOTICE, "WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_records);
+		elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_fpi);
+		elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_bytes);*/
+		elog(NOTICE, "-------------------------Buffer PER Query usage info---------------------------------------");
+		elog(NOTICE, "Total local block hits at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_hit);
+        elog(NOTICE, "Total local block reads at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_read);
+		elog(NOTICE, "Total local block dirtied at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_dirtied);
+		elog(NOTICE, "Total local block written at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_written);
     }
     
     dfs_plan_state(queryDesc->planstate, 0);
-    elog(NOTICE, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
-    print_lock_info(queryDesc);
+    //elog(NOTICE, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
+    //print_lock_info(queryDesc);
     
 }
 
 static void custom_ExecutorEnd(QueryDesc *queryDesc)
 {  
-    if (prev_ExecutorEnd)
+    
+	if (prev_ExecutorEnd)
         prev_ExecutorEnd(queryDesc);
     else 
         standard_ExecutorEnd(queryDesc);
