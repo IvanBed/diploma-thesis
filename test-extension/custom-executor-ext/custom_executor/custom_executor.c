@@ -226,21 +226,9 @@ static void print_lock_info(QueryDesc *queryDesc)
     
 }
 
-static void dfs_plan_state(PlanState *node, int level)
+void print_instr_info(Instrumentation *per_node_info)
 {
-    if (!node)
-        return;
-
-    //elog(NOTICE, "Nesting level of plane node: %d", level);
-    
-    elog(NOTICE, "Node type: %d", node->type);
-    print_node_name(node->type);
-
-    Instrumentation *per_node_info  = node->instrument;
-
-    if (per_node_info)
-    {
-        //elog(NOTICE, "-------------------------Main info--------------------------------------------");
+    //elog(NOTICE, "-------------------------Main info--------------------------------------------");
         //elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
         elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
         elog(NOTICE, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
@@ -275,6 +263,48 @@ static void dfs_plan_state(PlanState *node, int level)
         elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
 		elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
         elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); */
+}
+
+static void bfs_plan_state(PlanState *node)
+{
+    List      *plan_state_queue = NULL;
+    PlanState *cur_node         = NULL;
+    
+    plan_state_queue = lcons(node, plan_state_queue);
+    while(list_length(plan_state_queue) > 0)
+    {
+        cur_node = list_head(plan_state_queue);
+        print_node_name(node->type);
+        if (node->instrument)
+        {
+            print_instr_info(node->instrument);
+        }
+        else 
+        {
+            elog(NOTICE, "Instrumentation is not init");
+        }
+        
+        plan_state_queue = lappend(cur_node->lefttree, plan_state_queue);
+        plan_state_queue = lappend(cur_node->righttree, plan_state_queue);
+        list_delete_first(plan_state_queue);
+    }
+}
+
+static void dfs_plan_state(PlanState *node, int level)
+{
+    if (!node)
+        return;
+
+    //elog(NOTICE, "Nesting level of plane node: %d", level);
+    
+    elog(NOTICE, "Node type: %d", node->type);
+    print_node_name(node->type);
+
+    Instrumentation *per_node_info  = node->instrument;
+
+    if (per_node_info)
+    {
+        print_instr_info(per_node_info);
     }
     else 
     {
