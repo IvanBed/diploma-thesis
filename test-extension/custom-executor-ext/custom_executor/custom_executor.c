@@ -427,6 +427,30 @@ static void init_lock_wrapper()
     lock_data_wrapper->reinit_flag = false;
 }
 
+void get_heap_tuples_info(QueryDesc *queryDesc)
+{
+    // DatumGetByteaP
+    EState query_state   = queryDesc->estate;
+    Relation   *rel_arr  = query_state->es_relations;
+   
+
+	for (size_t i = 0; i < estate->es_range_table_size; i++)
+	{
+		Datum cur_page_info_datum;
+        if (estate->es_relations[i])
+        {
+            cur_page_info_dat = DirectFunctionCall2(head_page_items, DatumGetByteaP(DirectFunctionCall2(get_raw_page, estate->es_relations[i], 0)));
+            
+        }
+ 			
+	}
+    // Get all rels used in query
+    // Call get_raw_page for each ones
+    // Call head_page_items for each ones
+    // Save all info in map
+
+}
+
 void _PG_init()
 {
     
