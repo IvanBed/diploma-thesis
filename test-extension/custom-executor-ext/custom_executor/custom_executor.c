@@ -430,16 +430,20 @@ static void init_lock_wrapper()
 void get_heap_tuples_info(QueryDesc *queryDesc)
 {
     // DatumGetByteaP
-    EState query_state   = queryDesc->estate;
-    Relation   *rel_arr  = query_state->es_relations;
-   
+    EState      query_state   = queryDesc->estate;
+    Relation   *rel_arr       = query_state->es_relations;
+    bytea	   *raw_page      = NULL;
 
 	for (size_t i = 0; i < estate->es_range_table_size; i++)
 	{
-		Datum cur_page_info_datum;
+		Datum *cur_page_info_datum;
         if (estate->es_relations[i])
         {
-            cur_page_info_dat = DirectFunctionCall2(head_page_items, DatumGetByteaP(DirectFunctionCall2(get_raw_page, estate->es_relations[i], 0)));
+            raw_page = DatumGetByteaP(DirectFunctionCall2(get_raw_page, estate->es_relations[i], 0)
+            while (cur_page_info_datum = DirectFunctionCall2(head_page_items)))
+            {
+                //...
+            }
             
         }
  			
