@@ -1,18 +1,25 @@
 #include "postgres.h"
 #include "fmgr.h"
+#include "pgstat.h"
 
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/rel.h"
 
+#include "storage/bufpage.h"
+#include "storage/lock.h"
+#include "storage/bufmgr.h"
+
+#include "access/xact.h"
+#include "access/relation.h"
+#include "access/htup_details.h"
+
 #include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "commands/explain.h"
-#include <access/xact.h>
+
 #include "tcop/utility.h"
-#include "storage/lock.h"
 #include "datatype/timestamp.h"
-//#include "executor/executor.h"
 
 #include <string.h>
 #include <stdint.h>
@@ -22,7 +29,6 @@
 #define EXECUTOR_FINISH 1
 
 PG_MODULE_MAGIC;
-
 
 struct LockInstanceDataWrapper
 {
@@ -156,6 +162,168 @@ static void print_lock_tag(LockTagType locktag_type)
     }
 }
 
+static bytea *get_raw_page(Oid relationid, ForkNumber forknum, BlockNumber blkno)
+{
+    bytea       *raw_page;
+    Relation    rel;
+    char       *raw_page_data;
+    Buffer        buf;
+
+    rel   = relation_open(relationid, AccessShareLock);
+
+    if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
+        ereport(ERROR,
+                (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+                 errmsg("cannot get raw page from relation \"%s\"",
+                        RelationGetRelationName(rel)),
+                 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
+
+    if (RELATION_IS_OTHER_TEMP(rel))
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("cannot access temporary tables of other sessions")));
+
+    if (blkno >= RelationGetNumberOfBlocksInFork(rel, forknum))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("block number %u is out of range for relation \"%s\"",
+                        blkno, RelationGetRelationName(rel))));
+
+    raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
+    SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
+    raw_page_data = VARDATA(raw_page);
+
+    buf = ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL);
+    LockBuffer(buf, BUFFER_LOCK_SHARE);
+
+    memcpy(raw_page_data, BufferGetPage(buf), BLCKSZ);
+
+    LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+    ReleaseBuffer(buf);
+
+    relation_close(rel, AccessShareLock);
+    return raw_page;
+}
+
+Page get_page_from_raw(bytea *raw_page)
+{
+    Page        page;
+    int         raw_page_size;
+
+    raw_page_size = VARSIZE_ANY_EXHDR(raw_page);
+
+    if (raw_page_size != BLCKSZ)
+        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("invalid page size"), errdetail("Expected %d bytes, got %d.", BLCKSZ, raw_page_size)));
+
+    page = palloc(raw_page_size);
+
+    memcpy(page, VARDATA_ANY(raw_page), raw_page_size);
+    return page;
+}
+
+size_t get_c_tids_from_page(Page *page, BlockNumber blk_idx)
+{
+    OffsetNumber item_data_size = PageGetMaxOffsetNumber(page);
+
+    //elog(NOTICE, "ITEM DATA SIZE %d", item_data_size);
+    ItemId           id;
+    HeapTupleHeader  tuphdr;
+    ItemPointerData  tid;
+    uint16        lp_offset;
+    uint16        lp_flags;
+    uint16        lp_len;
+    BlockNumber block_num;
+
+    size_t tuple_new_page = 0;
+
+    for (OffsetNumber offset = FirstOffsetNumber; offset <= item_data_size; offset++)
+    {
+        id        = PageGetItemId(page, offset);
+        lp_offset = ItemIdGetOffset(id);
+        lp_flags  = ItemIdGetFlags(id);
+        lp_len    = ItemIdGetLength(id);
+        
+        if (ItemIdHasStorage(id) && lp_len >= MinHeapTupleSize &&
+            lp_offset == MAXALIGN(lp_offset) && lp_offset + lp_len <= BLCKSZ)
+        {
+        
+            tuphdr = (HeapTupleHeader) PageGetItem(page, id);
+            
+            tid = tuphdr->t_ctid;
+            
+            block_num = ItemPointerGetBlockNumber(&tid); 
+            if (block_num != blk_idx)
+                tuple_new_page++;
+            //elog(NOTICE, "Line pointer: %d, Block number: %d", lp_offset, block_num);  
+        }     
+    }
+    //elog(NOTICE, "Tuples that have been moved to a new page\n total tuples: %d, Block idx: %d", tuple_new_page, blk_idx);  
+}
+
+void get_page_tuple_info(Relation rel, BlockNumber blk_idx)
+{
+    bytea      *raw_page      = NULL;
+    Page       *cur_page      = NULL;
+    Oid         rel_oid       = rel->rd_id;
+    
+    raw_page = get_raw_page(rel_oid, MAIN_FORKNUM, blk_idx);
+    if (raw_page)
+    {
+        cur_page = get_page_from_raw(raw_page);
+        if (cur_page)
+        {
+            get_c_tids_from_page(cur_page, blk_idx);
+            pfree(cur_page);
+        }
+        pfree(raw_page);
+    }
+}
+
+void get_rel_tuples_info(QueryDesc *queryDesc)
+{
+    EState     *query_state   = queryDesc->estate;
+    Relation   *rel_arr       = query_state->es_relations;
+    
+    for (size_t rel_idx = 0; rel_idx < query_state->es_range_table_size; rel_idx++)
+    {
+        Relation cur_rel = query_state->es_relations[rel_idx];
+        if (cur_rel)
+        {
+            BlockNumber total_blck_cnt = RelationGetNumberOfBlocks(cur_rel);
+            for (BlockNumber blk_idx = 0; blk_idx < total_blck_cnt; blk_idx++)
+                get_page_tuple_info(cur_rel, blk_idx);
+        }            
+    }
+}
+
+void print_rel_info(Relation rel)
+{
+    
+    if (rel->pgstat_info)
+    {
+        elog(INFO, "Tuples that have been updated: %d", rel->pgstat_info->counts.tuples_updated);
+        elog(INFO, "Tuples that have been moved to a new page: %d", rel->pgstat_info->counts.tuples_newpage_updated);
+        elog(INFO, "Tuples that have been hot updated: %d", rel->pgstat_info->counts.tuples_hot_updated);
+    }
+    else 
+    {
+        elog(INFO, "Relation info structure is NULL");
+    }
+
+}
+
+void print_query_rels_info(QueryDesc *queryDesc)
+{
+    EState     *query_state   = queryDesc->estate;
+    Relation   *rel_arr       = query_state->es_relations;
+    for (size_t rel_idx = 0; rel_idx < query_state->es_range_table_size; rel_idx++)
+    {
+        Relation cur_rel = query_state->es_relations[rel_idx];
+        if (cur_rel)
+            print_rel_info(cur_rel);
+    }
+}
+
 static void init_lock_info(QueryDesc *queryDesc)
 {    
     lock_data_wrapper->lock_data = GetLockStatusData();
@@ -228,44 +396,42 @@ static void print_lock_info(QueryDesc *queryDesc)
 
 void print_instr_info(Instrumentation *per_node_info)
 {
-    //elog(NOTICE, "-------------------------Main info--------------------------------------------");
-        //elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
-        elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
-        elog(NOTICE, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
-		
-		/*elog(NOTICE, "need_timer: %d", per_node_info->need_timer);
-		elog(NOTICE, "need_bufusage: %d", per_node_info->need_bufusage);
-		elog(NOTICE, "need_walusage: %d", per_node_info->need_walusage);*/
-		elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
-/*        elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_read_time));
-        elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_write_time));
-        elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_read_time));
-        elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_write_time));
+    elog(NOTICE, "-------------------------Main info--------------------------------------------");
+    elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
+    elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
+    elog(NOTICE, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
         
-		
-		elog(NOTICE, "Local block hits at the current node cycle: %ld", per_node_info->bufusage.local_blks_hit);
-        elog(NOTICE, "Local block reads at the current node cycle: %ld", per_node_info->bufusage.local_blks_read);
-		elog(NOTICE, "Local block dirtied at the current node cycle: %ld", per_node_info->bufusage.local_blks_dirtied);
-		elog(NOTICE, "Local block written at the current node cycle: %ld", per_node_info->bufusage.local_blks_written);	
-*/
-		/*elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit - per_node_info->bufusage_start.shared_blks_hit);
-        elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read  - per_node_info->bufusage_start.shared_blks_read);
-		elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied - per_node_info->bufusage_start.shared_blks_dirtied);
-		elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written - per_node_info->bufusage_start.shared_blks_written);	
-		*/
-		elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit);
-        elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read);
-		elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied);
-		elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written);	
+    elog(NOTICE, "need_timer: %d", per_node_info->need_timer);
+    elog(NOTICE, "need_bufusage: %d", per_node_info->need_bufusage);
+    elog(NOTICE, "need_walusage: %d", per_node_info->need_walusage);
+    elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
+    elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_read_time));
+    elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_write_time));
+    elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_read_time));
+    elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_write_time));
+        
+    elog(NOTICE, "Local block hits at the current node cycle: %ld", per_node_info->bufusage.local_blks_hit);
+    elog(NOTICE, "Local block reads at the current node cycle: %ld", per_node_info->bufusage.local_blks_read);
+    elog(NOTICE, "Local block dirtied at the current node cycle: %ld", per_node_info->bufusage.local_blks_dirtied);
+    elog(NOTICE, "Local block written at the current node cycle: %ld", per_node_info->bufusage.local_blks_written);    
 
-		
-	    /*elog(NOTICE, "-------------------------WAL PER NODE usage info---------------------------------------");
-        elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
-		elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
-        elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); */
+    elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit - per_node_info->bufusage_start.shared_blks_hit);
+    elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read  - per_node_info->bufusage_start.shared_blks_read);
+    elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied - per_node_info->bufusage_start.shared_blks_dirtied);
+    elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written - per_node_info->bufusage_start.shared_blks_written);    
+        
+    elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit);
+    elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read);
+    elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied);
+    elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written);    
+
+    elog(NOTICE, "-------------------------WAL PER NODE usage info---------------------------------------");
+    elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
+    elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
+    elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); 
 }
 
-static void bfs_plan_state(PlanState *node)
+/*static void bfs_plan_state(PlanState *node)
 {
     List      *plan_state_queue = NULL;
     PlanState *cur_node         = NULL;
@@ -289,7 +455,7 @@ static void bfs_plan_state(PlanState *node)
         list_delete_first(plan_state_queue);
     }
 }
-
+*/
 static void dfs_plan_state(PlanState *node, int level)
 {
     if (!node)
@@ -319,17 +485,17 @@ static void dfs_plan_state(PlanState *node, int level)
 
 void init_instr(PlanState *node)
 {
-	if (!node)
+    if (!node)
         return;
-	
-	Instrumentation *per_node_info  = node->instrument;
-	per_node_info->need_timer       = true;
-	per_node_info->need_bufusage    = true;
-	per_node_info->need_walusage    = true;
-	
-	init_instr(node->lefttree);
+    
+    Instrumentation *per_node_info  = node->instrument;
+    per_node_info->need_timer       = true;
+    per_node_info->need_bufusage    = true;
+    per_node_info->need_walusage    = true;
+    
+    init_instr(node->lefttree);
     init_instr(node->righttree);
-	
+    
 }
 
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
@@ -337,9 +503,9 @@ static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
     queryDesc->instrument_options |= INSTRUMENT_TIMER; 
     queryDesc->instrument_options |= INSTRUMENT_BUFFERS;
     queryDesc->instrument_options |= INSTRUMENT_ROWS;
-	queryDesc->instrument_options |= INSTRUMENT_WAL;
-	
-	
+    queryDesc->instrument_options |= INSTRUMENT_WAL;
+    
+    
     TransactionId xid = GetCurrentTransactionId();
     elog(NOTICE, "Transaction id: %d", xid);
     
@@ -379,21 +545,21 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     
     InstrEndLoop(queryDesc->totaltime);
     
-    if (queryDesc->totaltime)
+    /*if (queryDesc->totaltime)
     {
         elog(NOTICE, "Time spent to execute the query: %f seconds", queryDesc->totaltime->total);
-		/*elog(NOTICE, "-------------------------WAL PER Query usage info---------------------------------------");
-		elog(NOTICE, "WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_records);
-		elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_fpi);
-		elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_bytes);*/
-		elog(NOTICE, "-------------------------Buffer PER Query usage info---------------------------------------");
-		elog(NOTICE, "Total local block hits at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_hit);
+        elog(NOTICE, "-------------------------WAL PER Query usage info---------------------------------------");
+        elog(NOTICE, "WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_records);
+        elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_fpi);
+        elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_bytes);
+        elog(NOTICE, "-------------------------Buffer PER Query usage info---------------------------------------");
+        elog(NOTICE, "Total local block hits at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_hit);
         elog(NOTICE, "Total local block reads at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_read);
-		elog(NOTICE, "Total local block dirtied at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_dirtied);
-		elog(NOTICE, "Total local block written at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_written);
-    }
+        elog(NOTICE, "Total local block dirtied at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_dirtied);
+        elog(NOTICE, "Total local block written at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_written);
+    }*/
     
-    dfs_plan_state(queryDesc->planstate, 0);
+    //dfs_plan_state(queryDesc->planstate, 0);
     //elog(NOTICE, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
     //print_lock_info(queryDesc);
     
@@ -401,8 +567,8 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
 
 static void custom_ExecutorEnd(QueryDesc *queryDesc)
 {  
-    
-	if (prev_ExecutorEnd)
+    print_query_rels_info(queryDesc);
+    if (prev_ExecutorEnd)
         prev_ExecutorEnd(queryDesc);
     else 
         standard_ExecutorEnd(queryDesc);
@@ -416,7 +582,6 @@ static void custom_ProcessUtility(PlannedStmt *pstmt, const char *queryString, b
     else
         standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
     
-    elog(NOTICE, "TEST custom_ProcessUtility %s", queryString);
     
 }
 
@@ -425,34 +590,6 @@ static void init_lock_wrapper()
     lock_data_wrapper = (LockInstanceDataWrapper*) palloc(sizeof(LockInstanceDataWrapper));
     lock_data_wrapper->lock_data   = NULL;
     lock_data_wrapper->reinit_flag = false;
-}
-
-void get_heap_tuples_info(QueryDesc *queryDesc)
-{
-    // DatumGetByteaP
-    EState      query_state   = queryDesc->estate;
-    Relation   *rel_arr       = query_state->es_relations;
-    bytea	   *raw_page      = NULL;
-
-	for (size_t i = 0; i < estate->es_range_table_size; i++)
-	{
-		Datum *cur_page_info_datum;
-        if (estate->es_relations[i])
-        {
-            raw_page = DatumGetByteaP(DirectFunctionCall2(get_raw_page, estate->es_relations[i], 0)
-            while (cur_page_info_datum = DirectFunctionCall2(head_page_items)))
-            {
-                //...
-            }
-            
-        }
- 			
-	}
-    // Get all rels used in query
-    // Call get_raw_page for each ones
-    // Call head_page_items for each ones
-    // Save all info in map
-
 }
 
 void _PG_init()
