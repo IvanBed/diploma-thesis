@@ -162,163 +162,28 @@ static void print_lock_tag(LockTagType locktag_type)
     }
 }
 
-static bytea *get_raw_page(Oid relationid, ForkNumber forknum, BlockNumber blkno)
-{
-    bytea       *raw_page;
-    Relation    rel;
-    char       *raw_page_data;
-    Buffer        buf;
-
-    rel   = relation_open(relationid, AccessShareLock);
-
-    if (!RELKIND_HAS_STORAGE(rel->rd_rel->relkind))
-        ereport(ERROR,
-                (errcode(ERRCODE_WRONG_OBJECT_TYPE),
-                 errmsg("cannot get raw page from relation \"%s\"",
-                        RelationGetRelationName(rel)),
-                 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
-
-    if (RELATION_IS_OTHER_TEMP(rel))
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("cannot access temporary tables of other sessions")));
-
-    if (blkno >= RelationGetNumberOfBlocksInFork(rel, forknum))
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("block number %u is out of range for relation \"%s\"",
-                        blkno, RelationGetRelationName(rel))));
-
-    raw_page = (bytea *) palloc(BLCKSZ + VARHDRSZ);
-    SET_VARSIZE(raw_page, BLCKSZ + VARHDRSZ);
-    raw_page_data = VARDATA(raw_page);
-
-    buf = ReadBufferExtended(rel, forknum, blkno, RBM_NORMAL, NULL);
-    LockBuffer(buf, BUFFER_LOCK_SHARE);
-
-    memcpy(raw_page_data, BufferGetPage(buf), BLCKSZ);
-
-    LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-    ReleaseBuffer(buf);
-
-    relation_close(rel, AccessShareLock);
-    return raw_page;
-}
-
-Page get_page_from_raw(bytea *raw_page)
-{
-    Page        page;
-    int         raw_page_size;
-
-    raw_page_size = VARSIZE_ANY_EXHDR(raw_page);
-
-    if (raw_page_size != BLCKSZ)
-        ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("invalid page size"), errdetail("Expected %d bytes, got %d.", BLCKSZ, raw_page_size)));
-
-    page = palloc(raw_page_size);
-
-    memcpy(page, VARDATA_ANY(raw_page), raw_page_size);
-    return page;
-}
-
-size_t get_c_tids_from_page(Page *page, BlockNumber blk_idx)
-{
-    OffsetNumber item_data_size = PageGetMaxOffsetNumber(page);
-
-    //elog(NOTICE, "ITEM DATA SIZE %d", item_data_size);
-    ItemId           id;
-    HeapTupleHeader  tuphdr;
-    ItemPointerData  tid;
-    uint16        lp_offset;
-    uint16        lp_flags;
-    uint16        lp_len;
-    BlockNumber block_num;
-
-    size_t tuple_new_page = 0;
-
-    for (OffsetNumber offset = FirstOffsetNumber; offset <= item_data_size; offset++)
-    {
-        id        = PageGetItemId(page, offset);
-        lp_offset = ItemIdGetOffset(id);
-        lp_flags  = ItemIdGetFlags(id);
-        lp_len    = ItemIdGetLength(id);
-        
-        if (ItemIdHasStorage(id) && lp_len >= MinHeapTupleSize &&
-            lp_offset == MAXALIGN(lp_offset) && lp_offset + lp_len <= BLCKSZ)
-        {
-        
-            tuphdr = (HeapTupleHeader) PageGetItem(page, id);
-            
-            tid = tuphdr->t_ctid;
-            
-            block_num = ItemPointerGetBlockNumber(&tid); 
-            if (block_num != blk_idx)
-                tuple_new_page++;
-            //elog(NOTICE, "Line pointer: %d, Block number: %d", lp_offset, block_num);  
-        }     
-    }
-    //elog(NOTICE, "Tuples that have been moved to a new page\n total tuples: %d, Block idx: %d", tuple_new_page, blk_idx);  
-}
-
-void get_page_tuple_info(Relation rel, BlockNumber blk_idx)
-{
-    bytea      *raw_page      = NULL;
-    Page       *cur_page      = NULL;
-    Oid         rel_oid       = rel->rd_id;
-    
-    raw_page = get_raw_page(rel_oid, MAIN_FORKNUM, blk_idx);
-    if (raw_page)
-    {
-        cur_page = get_page_from_raw(raw_page);
-        if (cur_page)
-        {
-            get_c_tids_from_page(cur_page, blk_idx);
-            pfree(cur_page);
-        }
-        pfree(raw_page);
-    }
-}
-
-void get_rel_tuples_info(QueryDesc *queryDesc)
-{
-    EState     *query_state   = queryDesc->estate;
-    Relation   *rel_arr       = query_state->es_relations;
-    
-    for (size_t rel_idx = 0; rel_idx < query_state->es_range_table_size; rel_idx++)
-    {
-        Relation cur_rel = query_state->es_relations[rel_idx];
-        if (cur_rel)
-        {
-            BlockNumber total_blck_cnt = RelationGetNumberOfBlocks(cur_rel);
-            for (BlockNumber blk_idx = 0; blk_idx < total_blck_cnt; blk_idx++)
-                get_page_tuple_info(cur_rel, blk_idx);
-        }            
-    }
-}
-
 void print_rel_info(Relation rel)
 {
     
     if (rel->pgstat_info)
     {
-        elog(INFO, "Tuples that have been updated: %d", rel->pgstat_info->counts.tuples_updated);
-        elog(INFO, "Tuples that have been moved to a new page: %d", rel->pgstat_info->counts.tuples_newpage_updated);
-        elog(INFO, "Tuples that have been hot updated: %d", rel->pgstat_info->counts.tuples_hot_updated);
+        elog(INFO, "Tuples that have been updated: %ld", rel->pgstat_info->counts.tuples_updated);
+        elog(INFO, "Tuples that have been moved to a new page: %ld", rel->pgstat_info->counts.tuples_newpage_updated);
+        elog(INFO, "Tuples that have been hot updated: %ld", rel->pgstat_info->counts.tuples_hot_updated);
     }
     else 
     {
         elog(INFO, "Relation info structure is NULL");
     }
-
 }
 
 void print_query_rels_info(QueryDesc *queryDesc)
 {
     EState     *query_state   = queryDesc->estate;
-    Relation   *rel_arr       = query_state->es_relations;
+    Relation   *rels_arr       = query_state->es_relations;
     for (size_t rel_idx = 0; rel_idx < query_state->es_range_table_size; rel_idx++)
     {
-        Relation cur_rel = query_state->es_relations[rel_idx];
+        Relation cur_rel = rels_arr[rel_idx];
         if (cur_rel)
             print_rel_info(cur_rel);
     }
@@ -391,7 +256,6 @@ static void print_lock_info(QueryDesc *queryDesc)
             lock_data_wrapper->reinit_flag = true;
         }    
     }
-    
 }
 
 void print_instr_info(Instrumentation *per_node_info)
@@ -481,7 +345,6 @@ static void dfs_plan_state(PlanState *node, int level)
     dfs_plan_state(node->lefttree, level);
     dfs_plan_state(node->righttree, level);
 }
-
 
 void init_instr(PlanState *node)
 {
