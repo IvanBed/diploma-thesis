@@ -30,13 +30,13 @@
 
 PG_MODULE_MAGIC;
 
-struct LockInstanceDataWrapper
+struct LockInstanceDataStorage
 {
-    LockData *lock_data;
-    bool reinit_flag;
+    LockData *current_lock_data;
+    LockData *prev_lock_data;
 };
 
-typedef struct LockInstanceDataWrapper LockInstanceDataWrapper;
+typedef struct LockInstanceDataStorage LockInstanceDataStorage;
 
 static ExecutorStart_hook_type prev_ExecutorStart    = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun        = NULL;
@@ -44,7 +44,136 @@ static ExecutorFinish_hook_type prev_ExecutorFinish  = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd        = NULL;
 static ProcessUtility_hook_type prev_ProcessUtility  = NULL;
 
-static LockInstanceDataWrapper  *lock_data_wrapper   = NULL;
+static LockInstanceDataStorage  *lock_storage = NULL;
+
+static void create_lock_storage()
+{
+    lock_storage = (LockInstanceDataStorage*) palloc(sizeof(LockInstanceDataStorage));
+    
+    lock_storage->current_lock_data = NULL;
+    lock_storage->prev_lock_data    = NULL;
+}
+
+static void free_lock_data(LockData *lock_data)
+{
+    if (lock_data)
+    {
+        if (lock_data->locks)
+        {
+            pfree(lock_data->locks);
+        }
+        pfree(lock_data);
+    }
+}
+
+static void destroy_lock_storage()
+{
+    if (lock_storage)
+    {
+        if (lock_storage->current_lock_data)
+            free_lock_data(lock_storage->current_lock_data);
+        
+        if (lock_storage->prev_lock_data)
+            free_lock_data(lock_storage->prev_lock_data);
+       
+        pfree(lock_storage);
+    } 
+}
+
+static void init_lock_storage()
+{    
+    if (!lock_storage->current_lock_data && !lock_storage->prev_lock_data)
+    {
+        elog(INFO, "init_lock_storage\n First case");
+        
+        lock_storage->current_lock_data = GetLockStatusData();
+        lock_storage->prev_lock_data    = GetLockStatusData();
+        LockInstanceData     *instance  = NULL;
+        for (size_t i = 0; i < lock_storage->prev_lock_data->nelements; i++)
+        {
+            instance = &(lock_storage->prev_lock_data->locks[i]);
+            instance->waitStart = 0;
+        }
+    }
+    else
+    {
+        elog(INFO, "init_lock_storage\n Second case");
+        LockData *temp_data = GetLockStatusData();
+        pfree(temp_data);
+        elog(NOTICE, "temp_data pointer %ld", temp_data);
+        lock_storage->current_lock_data = temp_data;        
+    } 
+
+    elog(NOTICE, "current_lock_data pointer %ld", lock_storage->current_lock_data);
+    elog(NOTICE, "prev_lock_data pointer %ld", lock_storage->prev_lock_data);
+
+    elog(NOTICE, "current_lock_data size %ld", lock_storage->current_lock_data->nelements);
+    elog(NOTICE, "prev_lock_data size %ld", lock_storage->prev_lock_data->nelements);    
+}
+
+static bool lock_data_inst_compare(LockInstanceData *l_instance, LockInstanceData *r_instance)
+{
+    if (l_instance->locktag.locktag_type != r_instance->locktag.locktag_type)
+        return false;
+    
+    switch(l_instance->locktag.locktag_type)
+    {
+        case LOCKTAG_RELATION: case LOCKTAG_RELATION_EXTEND: case LOCKTAG_DATABASE_FROZEN_IDS:
+            if (l_instance->locktag.locktag_field1 == r_instance->locktag.locktag_field1 && l_instance->locktag.locktag_field2 == r_instance->locktag.locktag_field2)
+                return true;
+            else
+                return false;
+        
+        case LOCKTAG_VIRTUALTRANSACTION: case LOCKTAG_TRANSACTION: case LOCKTAG_SPECULATIVE_TOKEN:
+            if (l_instance->locktag.locktag_field1 == r_instance->locktag.locktag_field1)
+                return true;
+            else
+                return false;        
+
+        case LOCKTAG_PAGE:
+            if (l_instance->locktag.locktag_field1 == r_instance->locktag.locktag_field1 
+                && l_instance->locktag.locktag_field2 == r_instance->locktag.locktag_field2 
+                    && l_instance->locktag.locktag_field3 == r_instance->locktag.locktag_field3)
+                return true;
+            else
+                return false; 
+        
+        case LOCKTAG_TUPLE: case LOCKTAG_OBJECT: case LOCKTAG_ADVISORY: case LOCKTAG_APPLY_TRANSACTION:
+            if (l_instance->locktag.locktag_field1 == r_instance->locktag.locktag_field1 
+                && l_instance->locktag.locktag_field2 == r_instance->locktag.locktag_field2 
+                    && l_instance->locktag.locktag_field3 == r_instance->locktag.locktag_field3
+                        &&l_instance->locktag.locktag_field4 == r_instance->locktag.locktag_field4)
+                return true;
+            else
+                return false; 
+
+        default:
+            return false;
+    }
+}
+
+static void update_value(LockData *lock_data, LockInstanceData *prev_instance)
+{
+    LockInstanceData * cur_instance = NULL;
+    for (size_t i = 0; i < lock_data->nelements; i++)
+    {
+        cur_instance = &(lock_data->locks[i]);
+        if (lock_data_inst_compare(prev_instance, cur_instance))
+        {
+            prev_instance->waitStart = cur_instance->waitStart;
+        }
+    }
+}
+
+static void update_lock_storage()
+{
+    LockInstanceData *prev_instance = NULL;
+    for (size_t i = 0; i < lock_storage->prev_lock_data->nelements; i++)
+    {
+        prev_instance  = &(lock_storage->prev_lock_data->locks[i]);
+        update_value(lock_storage->current_lock_data, prev_instance);
+    }
+}
 
 static void print_log_type_of_query(CmdType cur_type)
 {
@@ -105,11 +234,9 @@ static void print_node_name(NodeTag tag)
         case T_ValuesScanState:
             elog(NOTICE, "Node tag: Values Scan");
             break;
-            
         case T_ModifyTableState:
             elog(NOTICE, "Node tag: Modify Table");
-            break;
-            
+            break;   
         default:
             elog(NOTICE, "Node tag: Unknown");
             break; 
@@ -164,7 +291,6 @@ static void print_lock_tag(LockTagType locktag_type)
 
 void print_rel_info(Relation rel)
 {
-    
     if (rel->pgstat_info)
     {
         elog(INFO, "Tuples that have been updated: %ld", rel->pgstat_info->counts.tuples_updated);
@@ -189,42 +315,29 @@ void print_query_rels_info(QueryDesc *queryDesc)
     }
 }
 
-static void init_lock_info(QueryDesc *queryDesc)
-{    
-    lock_data_wrapper->lock_data = GetLockStatusData();
-    LockInstanceData *instance   = NULL;
-    
-    if (lock_data_wrapper->reinit_flag)
-    {
-        for (size_t i = 0; i < lock_data_wrapper->lock_data->nelements; i++)
-        {
-            instance = &(lock_data_wrapper->lock_data->locks[i]);
-            instance->waitStart = 0;
-        }
-        lock_data_wrapper->reinit_flag = false;
-    }
-}
-
-static void print_lock_info(QueryDesc *queryDesc)
+static void print_lock_info()
 {
-    LockInstanceData *instance  = NULL;
+    LockInstanceData *cur_instance   = NULL;
+    LockInstanceData *prev_instance  = NULL;
+
     bool              granted   = false; 
     LOCKMODE          mode      = 0;
     
+
     TimestampTz end_timestamp   = GetCurrentTimestamp();
     
-    for (size_t i = 0; i < lock_data_wrapper->lock_data->nelements; i++)
+    for (size_t i = 0; i < lock_storage->current_lock_data->nelements; i++)
     {
-        instance = &(lock_data_wrapper->lock_data->locks[i]);
-        
-        if (instance->holdMask)
+        cur_instance  = &(lock_storage->current_lock_data->locks[i]);
+        prev_instance = &(lock_storage->prev_lock_data->locks[i]);
+        if (cur_instance->holdMask)
         {
             for (mode = 0; mode < MAX_LOCKMODES; mode++)
             {
-                if (instance->holdMask & LOCKBIT_ON(mode))
+                if (cur_instance->holdMask & LOCKBIT_ON(mode))
                 {
                     granted = true;
-                    instance->holdMask &= LOCKBIT_OFF(mode);
+                    cur_instance->holdMask &= LOCKBIT_OFF(mode);
                     break;
                 }
             }
@@ -232,9 +345,10 @@ static void print_lock_info(QueryDesc *queryDesc)
         
         if (!granted)
         {
-            if (instance->waitLockMode != NoLock)
+            elog(NOTICE, "NOT GRANTED!");
+            if (cur_instance->waitLockMode != NoLock)
             {
-                mode = instance->waitLockMode;
+                mode = cur_instance->waitLockMode;
             }
             else
             {
@@ -242,57 +356,55 @@ static void print_lock_info(QueryDesc *queryDesc)
             }
         }
         
-        print_lock_tag((LockTagType) instance->locktag.locktag_type); 
-        elog(NOTICE, "Proccess id: %d", instance->pid);
-        elog(NOTICE, "Lock name: %s",GetLockmodeName(instance->locktag.locktag_lockmethodid, mode));
-        elog(NOTICE, "database: %d",instance->locktag.locktag_field1);
-        elog(NOTICE, "relation: %d",instance->locktag.locktag_field2);
+        print_lock_tag((LockTagType) cur_instance->locktag.locktag_type); 
+        elog(INFO, "Proccess id: %d", cur_instance->pid);
+        elog(INFO, "Lock name: %s", GetLockmodeName(cur_instance->locktag.locktag_lockmethodid, mode));
+        elog(INFO, "database: %d",cur_instance->locktag.locktag_field1);
+        elog(INFO, "relation: %d",cur_instance->locktag.locktag_field2);
         
-        if (instance->waitStart != 0)
-        {
-            elog(NOTICE, "end_timestamp: %ld", end_timestamp);
-            elog(NOTICE, "Lock time wait start: %ld", instance->waitStart);
-            elog(NOTICE, "Lock time activity: %ld", end_timestamp - instance->waitStart);
-            lock_data_wrapper->reinit_flag = true;
-        }    
+        elog(INFO, "Lock time wait start: %ld", cur_instance->waitStart);
+        if (cur_instance->waitStart != 0)
+            elog(INFO, "Lock wait time activity: %f seconds", TimestampDifferenceMilliseconds(cur_instance->waitStart, end_timestamp) / 1000.0);
+        else 
+            elog(INFO, "Lock  wait time activity: %ld", 0);
     }
 }
 
 void print_instr_info(Instrumentation *per_node_info)
 {
-    elog(NOTICE, "-------------------------Main info--------------------------------------------");
-    elog(NOTICE, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
-    elog(NOTICE, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
-    elog(NOTICE, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
+    elog(INFO, "-------------------------Main info--------------------------------------------");
+    elog(INFO, "Total tuples emitted at the current node cycle: %f", per_node_info->tuplecount);
+    elog(INFO, "Time spent at the current node cycle: %f seconds", INSTR_TIME_GET_DOUBLE(per_node_info->counter));
+    elog(INFO, "Time spent at the current node№2 cycle: %f seconds", per_node_info->total);
         
-    elog(NOTICE, "need_timer: %d", per_node_info->need_timer);
-    elog(NOTICE, "need_bufusage: %d", per_node_info->need_bufusage);
-    elog(NOTICE, "need_walusage: %d", per_node_info->need_walusage);
-    elog(NOTICE, "-------------------------Buffer usage info------------------------------------");
-    elog(NOTICE, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_read_time));
-    elog(NOTICE, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_write_time));
-    elog(NOTICE, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_read_time));
-    elog(NOTICE, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_write_time));
+    elog(INFO, "need_timer: %d", per_node_info->need_timer);
+    elog(INFO, "need_bufusage: %d", per_node_info->need_bufusage);
+    elog(INFO, "need_walusage: %d", per_node_info->need_walusage);
+    elog(INFO, "-------------------------Buffer usage info------------------------------------");
+    elog(INFO, "Time spent reading blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_read_time));
+    elog(INFO, "Time spent writing blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.blk_write_time));
+    elog(INFO, "Time spent reading temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_read_time));
+    elog(INFO, "Time spent writing temp blocks at the current node cycle: %ld nanoseconds", INSTR_TIME_GET_NANOSEC(per_node_info->bufusage.temp_blk_write_time));
         
-    elog(NOTICE, "Local block hits at the current node cycle: %ld", per_node_info->bufusage.local_blks_hit);
-    elog(NOTICE, "Local block reads at the current node cycle: %ld", per_node_info->bufusage.local_blks_read);
-    elog(NOTICE, "Local block dirtied at the current node cycle: %ld", per_node_info->bufusage.local_blks_dirtied);
-    elog(NOTICE, "Local block written at the current node cycle: %ld", per_node_info->bufusage.local_blks_written);    
+    elog(INFO, "Local block hits at the current node cycle: %ld", per_node_info->bufusage.local_blks_hit);
+    elog(INFO, "Local block reads at the current node cycle: %ld", per_node_info->bufusage.local_blks_read);
+    elog(INFO, "Local block dirtied at the current node cycle: %ld", per_node_info->bufusage.local_blks_dirtied);
+    elog(INFO, "Local block written at the current node cycle: %ld", per_node_info->bufusage.local_blks_written);    
 
-    elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit - per_node_info->bufusage_start.shared_blks_hit);
-    elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read  - per_node_info->bufusage_start.shared_blks_read);
-    elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied - per_node_info->bufusage_start.shared_blks_dirtied);
-    elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written - per_node_info->bufusage_start.shared_blks_written);    
+    elog(INFO, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit - per_node_info->bufusage_start.shared_blks_hit);
+    elog(INFO, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read  - per_node_info->bufusage_start.shared_blks_read);
+    elog(INFO, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied - per_node_info->bufusage_start.shared_blks_dirtied);
+    elog(INFO, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written - per_node_info->bufusage_start.shared_blks_written);    
         
-    elog(NOTICE, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit);
-    elog(NOTICE, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read);
-    elog(NOTICE, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied);
-    elog(NOTICE, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written);    
+    elog(INFO, "Shared block hits at the current node cycle: %ld", per_node_info->bufusage.shared_blks_hit);
+    elog(INFO, "Shared block reads at the current node cycle: %ld", per_node_info->bufusage.shared_blks_read);
+    elog(INFO, "Shared block dirtied at the current node cycle: %ld", per_node_info->bufusage.shared_blks_dirtied);
+    elog(INFO, "Shared block written at the current node cycle: %ld", per_node_info->bufusage.shared_blks_written);    
 
-    elog(NOTICE, "-------------------------WAL PER NODE usage info---------------------------------------");
-    elog(NOTICE, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
-    elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
-    elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); 
+    elog(INFO, "-------------------------WAL PER NODE usage info---------------------------------------");
+    elog(INFO, "WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_records);
+    elog(INFO, "WAL full page images produced at the current node cycle: %ld", per_node_info->walusage_start.wal_fpi);
+    elog(INFO, "Size of WAL records produced at the current node cycle: %ld", per_node_info->walusage_start.wal_bytes); 
 }
 
 /*static void bfs_plan_state(PlanState *node)
@@ -311,7 +423,7 @@ void print_instr_info(Instrumentation *per_node_info)
         }
         else 
         {
-            elog(NOTICE, "Instrumentation is not init");
+            elog(INFO, "Instrumentation is not init");
         }
         
         plan_state_queue = lappend(cur_node->lefttree, plan_state_queue);
@@ -325,9 +437,9 @@ static void dfs_plan_state(PlanState *node, int level)
     if (!node)
         return;
 
-    //elog(NOTICE, "Nesting level of plane node: %d", level);
+    //elog(INFO, "Nesting level of plane node: %d", level);
     
-    elog(NOTICE, "Node type: %d", node->type);
+    elog(INFO, "Node type: %d", node->type);
     print_node_name(node->type);
 
     Instrumentation *per_node_info  = node->instrument;
@@ -338,7 +450,7 @@ static void dfs_plan_state(PlanState *node, int level)
     }
     else 
     {
-        elog(NOTICE, "Instrumentation is not init");
+        elog(INFO, "Instrumentation is not init");
     }
 
     level++;
@@ -346,31 +458,17 @@ static void dfs_plan_state(PlanState *node, int level)
     dfs_plan_state(node->righttree, level);
 }
 
-void init_instr(PlanState *node)
-{
-    if (!node)
-        return;
-    
-    Instrumentation *per_node_info  = node->instrument;
-    per_node_info->need_timer       = true;
-    per_node_info->need_bufusage    = true;
-    per_node_info->need_walusage    = true;
-    
-    init_instr(node->lefttree);
-    init_instr(node->righttree);
-    
-}
-
 static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+    init_lock_storage();
+    
     queryDesc->instrument_options |= INSTRUMENT_TIMER; 
     queryDesc->instrument_options |= INSTRUMENT_BUFFERS;
     queryDesc->instrument_options |= INSTRUMENT_ROWS;
     queryDesc->instrument_options |= INSTRUMENT_WAL;
     
-    
     TransactionId xid = GetCurrentTransactionId();
-    elog(NOTICE, "Transaction id: %d", xid);
+    elog(INFO, "Transaction id: %d", xid);
     
     if (prev_ExecutorStart)
         prev_ExecutorStart(queryDesc, eflags);
@@ -385,8 +483,7 @@ static void custom_ExecutorStart(QueryDesc *queryDesc, int eflags)
         MemoryContextSwitchTo(oldcxt);
     }
      
-    elog(NOTICE, "LOCK INFO AT STEP Executor Start", queryDesc->totaltime->total);
-    //init_lock_info(queryDesc);
+    elog(INFO, "LOCK INFO AT STEP Executor Start", queryDesc->totaltime->total);
 }
 
 static void custom_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
@@ -410,27 +507,28 @@ static  void custom_ExecutorFinish(QueryDesc *queryDesc)
     
     /*if (queryDesc->totaltime)
     {
-        elog(NOTICE, "Time spent to execute the query: %f seconds", queryDesc->totaltime->total);
-        elog(NOTICE, "-------------------------WAL PER Query usage info---------------------------------------");
-        elog(NOTICE, "WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_records);
-        elog(NOTICE, "WAL full page images produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_fpi);
-        elog(NOTICE, "Size of WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_bytes);
-        elog(NOTICE, "-------------------------Buffer PER Query usage info---------------------------------------");
-        elog(NOTICE, "Total local block hits at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_hit);
-        elog(NOTICE, "Total local block reads at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_read);
-        elog(NOTICE, "Total local block dirtied at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_dirtied);
-        elog(NOTICE, "Total local block written at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_written);
+        elog(INFO, "Time spent to execute the query: %f seconds", queryDesc->totaltime->total);
+        elog(INFO, "-------------------------WAL PER Query usage info---------------------------------------");
+        elog(INFO, "WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_records);
+        elog(INFO, "WAL full page images produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_fpi);
+        elog(INFO, "Size of WAL records produced at the current node cycle: %ld", queryDesc->totaltime->walusage.wal_bytes);
+        elog(INFO, "-------------------------Buffer PER Query usage info---------------------------------------");
+        elog(INFO, "Total local block hits at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_hit);
+        elog(INFO, "Total local block reads at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_read);
+        elog(INFO, "Total local block dirtied at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_dirtied);
+        elog(INFO, "Total local block written at the current node cycle: %ld", queryDesc->totaltime->bufusage.local_blks_written);
     }*/
     
     //dfs_plan_state(queryDesc->planstate, 0);
-    //elog(NOTICE, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
-    //print_lock_info(queryDesc);
+    //elog(INFO, "LOCK INFO AT STEP ExecutorFinish", queryDesc->totaltime->total);
+    print_lock_info();
     
 }
 
 static void custom_ExecutorEnd(QueryDesc *queryDesc)
 {  
-    print_query_rels_info(queryDesc);
+    update_lock_storage();
+    //print_query_rels_info(queryDesc);
     if (prev_ExecutorEnd)
         prev_ExecutorEnd(queryDesc);
     else 
@@ -444,25 +542,13 @@ static void custom_ProcessUtility(PlannedStmt *pstmt, const char *queryString, b
         prev_ProcessUtility(pstmt, queryString,readOnlyTree, context, params, queryEnv, dest, qc);
     else
         standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
-    
-    
-}
-
-static void init_lock_wrapper()
-{
-    lock_data_wrapper = (LockInstanceDataWrapper*) palloc(sizeof(LockInstanceDataWrapper));
-    lock_data_wrapper->lock_data   = NULL;
-    lock_data_wrapper->reinit_flag = false;
 }
 
 void _PG_init()
 {
-    
     if(!process_shared_preload_libraries_in_progress)
         elog(FATAL, "Please use shared_preload_libraries");
     
-    init_lock_wrapper();
-        
     prev_ExecutorStart = ExecutorStart_hook;
     ExecutorStart_hook = custom_ExecutorStart;
 
@@ -477,4 +563,6 @@ void _PG_init()
     
     prev_ProcessUtility = ProcessUtility_hook;
     ProcessUtility_hook = custom_ProcessUtility;
+
+    create_lock_storage();
 }
