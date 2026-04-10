@@ -33,7 +33,7 @@ PG_MODULE_MAGIC;
 struct LockInstanceDataStorage
 {
     LockData *current_lock_data;
-    LockData *prev_lock_data;
+    List     *prev_lock_data;
 };
 
 typedef struct LockInstanceDataStorage LockInstanceDataStorage;
@@ -74,7 +74,7 @@ static void destroy_lock_storage()
             free_lock_data(lock_storage->current_lock_data);
         
         if (lock_storage->prev_lock_data)
-            free_lock_data(lock_storage->prev_lock_data);
+            list_free(lock_storage->prev_lock_data);
        
         pfree(lock_storage);
     } 
@@ -85,21 +85,24 @@ static void init_lock_storage()
     if (!lock_storage->current_lock_data && !lock_storage->prev_lock_data)
     {
         elog(INFO, "init_lock_storage\n First case");
-        
+        size_t temp_wait_start          = 0;
+
         lock_storage->current_lock_data = GetLockStatusData();
-        lock_storage->prev_lock_data    = GetLockStatusData();
         LockInstanceData     *instance  = NULL;
-        for (size_t i = 0; i < lock_storage->prev_lock_data->nelements; i++)
+        
+        for (size_t i = 0; i < lock_storage->current_lock_data->nelements; i++)
         {
-            instance = &(lock_storage->prev_lock_data->locks[i]);
+            instance = &(lock_storage->current_lock_data->locks[i]);
+            temp_wait_start = instance->waitStart;
             instance->waitStart = 0;
+            lock_storage->prev_lock_data = lappend(instance, lock_storage->prev_lock_data);
+            instance->waitStart = temp_wait_start;
         }
     }
     else
     {
         elog(INFO, "init_lock_storage\n Second case");
         LockData *temp_data = GetLockStatusData();
-        pfree(temp_data);
         elog(NOTICE, "temp_data pointer %ld", temp_data);
         lock_storage->current_lock_data = temp_data;        
     } 
@@ -152,7 +155,7 @@ static bool lock_data_inst_compare(LockInstanceData *l_instance, LockInstanceDat
     }
 }
 
-static void update_value(LockData *lock_data, LockInstanceData *prev_instance)
+static void update_value(List *lock_data, LockInstanceData *prev_instance)
 {
     LockInstanceData * cur_instance = NULL;
     for (size_t i = 0; i < lock_data->nelements; i++)
@@ -161,17 +164,22 @@ static void update_value(LockData *lock_data, LockInstanceData *prev_instance)
         if (lock_data_inst_compare(prev_instance, cur_instance))
         {
             prev_instance->waitStart = cur_instance->waitStart;
+            return;
         }
     }
+
+    
 }
 
 static void update_lock_storage()
 {
-    LockInstanceData *prev_instance = NULL;
-    for (size_t i = 0; i < lock_storage->prev_lock_data->nelements; i++)
+    LockInstanceData *instance = NULL;
+    ListCell	     *list_cell     = NULL; 
+
+    foreach(list_cell, lock_storage->prev_lock_data)
     {
-        prev_instance  = &(lock_storage->prev_lock_data->locks[i]);
-        update_value(lock_storage->current_lock_data, prev_instance);
+        instance = (LockInstanceData *) lfirst(list_cell);
+        update_value(lock_storage->current_lock_data, instance);
     }
 }
 
