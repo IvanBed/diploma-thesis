@@ -1,41 +1,11 @@
-#include "postgres.h"
-
-#include "miscadmin.h"
-
-#include "storage/ipc.h"
-#include "storage/shmem.h"
-#include "storage/lwlock.h"
-#include "storage/proc.h"
-#include "storage/latch.h"
-
-#include "postmaster/bgworker.h"
-#include "postmaster/interrupt.h"
-
-#include "tcop/tcopprot.h"
-
-#include "executor/spi.h"
-
-#include "utils/builtins.h"
-#include "utils/wait_event.h"
-#include "utils/guc.h"
-
-#include "libpq/pqsignal.h"
-
-#define N_ARGS 1
+#include "worker.h"
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
 
-typedef struct CounterData 
-{
-    LWLock* lock;
-    int32_t counter;
-} CounterData;
-
 static CounterData *counterData;
-static SPIPlanPtr savedPlanInsert = NULL;
 
 static void test_shmem_request()
 {
@@ -91,40 +61,27 @@ void do_work()
 
 void write_stats_to_table()
 {
-    char *command  = "INSERT INTO public.test_table VALUES($1);";
-    char *command1 = "INSERT INTO test_table VALUES(5);";
-    Oid         argtypes[N_ARGS] = {INT4OID};
-    Datum       values[N_ARGS];
-    char        nulls[N_ARGS];
+	Relation rel;
+	HeapTuple tup;
+	Datum values[Natts_test_table];
+	bool nulls[Natts_test_table];
 
-    //values[0]   = Int32GetDatum(atomic_get_counter_value());
-    //nulls[0]    = ' ';
-     
-	
-	SetCurrentStatementStartTimestamp();
-	StartTransactionCommand();
-	SPI_connect();
-	PushActiveSnapshot(GetTransactionSnapshot());
+    int32_t id = atomic_get_counter_value();
+    text name  = "test";
 
-    //SPI_execute(command1, false, 0);
-    //SPI_execute_with_args(command, N_ARGS, argtypes, values, nulls, false, 1);
-    /*if(savedPlanInsert == NULL)
-    {
-        savedPlanInsert = SPI_prepare("INSERT INTO test_table VALUES(5);", 0, NULL);
-        
-        if (savedPlanInsert == NULL)
-            elog(ERROR, "Error preparing query");
-        
-        if (SPI_keepplan(savedPlanInsert))
-            elog(ERROR, "Error keeping plan");
-    }
+    Oid tbl_oid = name_to_oid(PHONEBOOK_TABLE_NAME);
 
-    if (SPI_execute_plan(savedPlanInsert, NULL, NULL, true, 1) < 0 || SPI_processed != 1)
-        elog(ERROR, "Failed to get current dict_id");
-    */
-	PopActiveSnapshot();
-    SPI_finish();
-	CommitTransactionCommand();   
+    memset(nulls, false, sizeof(nulls));
+
+    rel = table_open(tbl_oid, RowExclusiveLock);
+    values[Anum_test_table_id - 1]   = Int32GetDatum(next_id);
+	values[Anum_test_table_name - 1] = NameGetDatum(name);
+
+    tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+    CatalogTupleInsert(rel, tup);
+    heap_freetuple(tup);
+
+    table_close(rel, RowExclusiveLock);
 }
 
 void worker_main(Datum main_arg)
@@ -137,7 +94,6 @@ void worker_main(Datum main_arg)
 
     // Подумать как прокинуть OID db динамически
     BackgroundWorkerInitializeConnection("postgres", NULL, 0);
-    //write_stats_to_table();
 
     size_t counter = 0;
     for (;;)
@@ -156,7 +112,6 @@ void worker_main(Datum main_arg)
         
         do_work(); 
 
-        //if (counter % 10000 == 0)
         write_stats_to_table();
         counter++;
     }
