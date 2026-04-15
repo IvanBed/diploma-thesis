@@ -305,7 +305,7 @@ void print_rel_info(Relation rel)
 
 void print_query_rels_info(QueryDesc *queryDesc)
 {
-    EState     *query_state   = queryDesc->estate;
+    EState     *query_state    = queryDesc->estate;
     Relation   *rels_arr       = query_state->es_relations;
     for (size_t rel_idx = 0; rel_idx < query_state->es_range_table_size; rel_idx++)
     {
@@ -322,7 +322,6 @@ static void print_lock_info()
 
     bool              granted   = false; 
     LOCKMODE          mode      = 0;
-    
 
     TimestampTz end_timestamp   = GetCurrentTimestamp();
     

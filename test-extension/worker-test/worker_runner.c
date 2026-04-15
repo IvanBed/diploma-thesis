@@ -1,9 +1,10 @@
-#include <postgres.h>
-#include <miscadmin.h>
-#include <storage/ipc.h>
-#include <storage/shmem.h>
-#include <storage/lwlock.h>
-#include <utils/builtins.h>
+#include "postgres.h"
+#include "fmgr.h"
+#include "miscadmin.h"
+#include "storage/ipc.h"
+#include "storage/shmem.h"
+#include "storage/lwlock.h"
+#include "utils/builtins.h"
 
 #include "postmaster/bgworker.h"
 #include "postmaster/interrupt.h"
@@ -27,7 +28,7 @@ static void test_shmem_request()
         prev_shmem_request_hook();
 
     RequestAddinShmemSpace(MAXALIGN(sizeof(CounterData)));
-    RequestNamedLWLockTranche("experiment", 1);
+    RequestNamedLWLockTranche("shmem_chunk", 1);
 }
 
 static void test_shmem_startup()
@@ -43,7 +44,7 @@ static void test_shmem_startup()
     if(!found) 
 	{
         counterData->counter = 0;
-        counterData->lock = &(GetNamedLWLockTranche("experiment"))->lock;
+        counterData->lock = &(GetNamedLWLockTranche("shmem_chunk"))->lock;
     }
 
     LWLockRelease(AddinShmemInitLock);
@@ -67,10 +68,7 @@ void _PG_init()
     prev_shmem_startup_hook = shmem_startup_hook;
     shmem_startup_hook = test_shmem_startup;
 
-
     BackgroundWorker worker;
-
-
     memset(&worker, 0, sizeof(worker));
     
     worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -82,7 +80,7 @@ void _PG_init()
     worker.bgw_notify_pid = 0;
     snprintf(worker.bgw_name, BGW_MAXLEN, "worker worker %d", 1);
     snprintf(worker.bgw_type, BGW_MAXLEN, "worker");
-    worker.bgw_main_arg = Int32GetDatum(5);
+    worker.bgw_main_arg = PointerGetDatum(counterData);
 
     RegisterBackgroundWorker(&worker); 
 }
@@ -91,12 +89,11 @@ PG_FUNCTION_INFO_V1(get_counter_value);
 
 Datum get_counter_value(PG_FUNCTION_ARGS)
 {
-  int32_t result;
+    int32_t result;
 
-  LWLockAcquire(counterData->lock, LW_SHARED);
-  result = counterData->counter;
-  LWLockRelease(counterData->lock);
-
-  PG_RETURN_INT32(result);
+    LWLockAcquire(counterData->lock, LW_SHARED);
+    result = counterData->counter;
+    LWLockRelease(counterData->lock);
+    PG_RETURN_INT32(result);
 }
 
