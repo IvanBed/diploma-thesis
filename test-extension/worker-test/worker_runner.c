@@ -1,24 +1,9 @@
-#include "postgres.h"
-#include "fmgr.h"
-#include "miscadmin.h"
-#include "storage/ipc.h"
-#include "storage/shmem.h"
-#include "storage/lwlock.h"
-#include "utils/builtins.h"
-
-#include "postmaster/bgworker.h"
-#include "postmaster/interrupt.h"
+#include "worker_runner.h"
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
-
-typedef struct CounterData 
-{
-    LWLock* lock;
-    int32_t counter;
-} CounterData;
 
 CounterData *counterData;
 
@@ -52,8 +37,18 @@ static void test_shmem_startup()
 
 void init_worker(BackgroundWorker *worker)
 {
-
-
+    memset(worker, 0, sizeof(*worker));
+    
+    (*worker).bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    (*worker).bgw_start_time = BgWorkerStart_RecoveryFinished;
+    (*worker).bgw_restart_time = BGW_NEVER_RESTART;
+    
+    sprintf((*worker).bgw_library_name, "worker");
+    sprintf((*worker).bgw_function_name, "worker_main");
+    (*worker).bgw_notify_pid = 0;
+    snprintf((*worker).bgw_name, BGW_MAXLEN, "worker worker %d", 1);
+    snprintf((*worker).bgw_type, BGW_MAXLEN, "worker");
+    //(*worker).bgw_main_arg = PointerGetDatum(counterData);
 }
 
 void _PG_init()
@@ -69,18 +64,7 @@ void _PG_init()
     shmem_startup_hook = test_shmem_startup;
 
     BackgroundWorker worker;
-    memset(&worker, 0, sizeof(worker));
-    
-    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-    worker.bgw_restart_time = BGW_NEVER_RESTART;
-    
-    sprintf(worker.bgw_library_name, "worker");
-    sprintf(worker.bgw_function_name, "worker_main");
-    worker.bgw_notify_pid = 0;
-    snprintf(worker.bgw_name, BGW_MAXLEN, "worker worker %d", 1);
-    snprintf(worker.bgw_type, BGW_MAXLEN, "worker");
-    worker.bgw_main_arg = PointerGetDatum(counterData);
+    init_worker(&worker);
 
     RegisterBackgroundWorker(&worker); 
 }
