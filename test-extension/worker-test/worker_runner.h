@@ -31,9 +31,10 @@
     typedef struct Storage 
     {
         LWLock* lock;
-        size_t entry_size;
-        size_t store_capacity;
-        List   *store;    
+        size_t  store_capacity;
+        size_t  size;
+        Entry   *store;    
+        MemoryContext storage_mem_cxt;
 
     } Storage;
 
