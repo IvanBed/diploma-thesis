@@ -8,13 +8,18 @@
     #include "storage/ipc.h"
     #include "storage/shmem.h"
     #include "storage/lwlock.h"
-    
+    #include "storage/latch.h"  
+    #include "storage/proc.h"
+
     #include "utils/builtins.h"
 
     #include "nodes/pg_list.h"
+    #include "nodes/memnodes.h"
 
     #include "postmaster/bgworker.h"
     #include "postmaster/interrupt.h"
+
+    
 
     typedef struct CounterData 
     {

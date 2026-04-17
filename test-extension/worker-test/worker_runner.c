@@ -1,19 +1,43 @@
 #include "worker_runner.h"
 #define STORE_CAPACITY 5
 
-
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
+//Проверить можно ли
+static CounterData *counterData = NULL;
+static Storage     *storage     = NULL;
+static Latch       *latch       = NULL;
 
-static CounterData *counterData;
+bool full(void);
+void add_el(Entry *);
 
-static Storage *storage;
+void request_shmem_shared_latch()
+{
+    RequestAddinShmemSpace(MAXALIGN(sizeof(Latch)));
+    RequestNamedLWLockTranche("shmem_shared_latch", 1);
+}
+
+void init_shared_latch_if_needed()
+{
+    bool found;
+
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+    latch = ShmemInitStruct("Latch", sizeof(Latch), &found);
+    if(!found) 
+    {
+        InitSharedLatch(latch); 
+        ResetLatch(latch);    
+    }
+    LWLockRelease(AddinShmemInitLock);
+}
+
 
 void request_shmem_storage()
 {
-    size_t storage_size   = sizeof(Storage)
+    size_t storage_size   = sizeof(Storage);
 
     RequestAddinShmemSpace(MAXALIGN(storage_size));
     RequestNamedLWLockTranche("shmem_storage_chunk", 1);
@@ -31,6 +55,8 @@ void init_storage_shmem_if_needed()
         storage->size           = 0;
         storage->store          = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
         storage->lock           = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
+
+        memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
     }
 
     LWLockRelease(AddinShmemInitLock);
@@ -42,7 +68,7 @@ void request_shmem_counter_data()
     RequestNamedLWLockTranche("shmem_chunk", 1);
 }
 
-void init_storage_counter_data()
+void init_counter_data_if_needed()
 {
     bool found;
 
@@ -63,21 +89,21 @@ static void test_shmem_request()
     if(prev_shmem_request_hook)
         prev_shmem_request_hook();
 
-
     request_shmem_counter_data();
     request_shmem_storage();
 
+    request_shmem_shared_latch();
 }
 
 static void test_shmem_startup()
 {
-    bool found;
-    
     if(prev_shmem_startup_hook)
         prev_shmem_startup_hook();
 
-    init_storage_counter_data();
+    init_counter_data_if_needed();
     init_storage_shmem_if_needed();
+
+    init_shared_latch_if_needed();
 }
 
 void init_worker(BackgroundWorker *worker)
@@ -126,32 +152,63 @@ Datum get_counter_value(PG_FUNCTION_ARGS)
     PG_RETURN_INT32(result);
 }
 
-
 PG_FUNCTION_INFO_V1(set_store_entry);
 
 Datum set_store_entry(PG_FUNCTION_ARGS)
 {
-    int32_t id       = DatumGetInt(PG_GETARG_DATUM(0));
+    // проверка на null
+    int32_t id       = DatumGetInt32(PG_GETARG_DATUM(0));
     const char* name = TextDatumGetCString(PG_GETARG_DATUM(1));
+    
+    elog(NOTICE, "set_store_entry");
+    elog(NOTICE, "id  %d", id);  
+    elog(NOTICE, "name  %s", name); 
+    
+
     if (!full())
     {
         Entry entry;
         entry.id   = id;
-        entry.name = name;
+        entry.name = "name";
         add_el(&entry);
     }
+    else 
+    {
+        elog(NOTICE, "SetLatch"); 
+        SetLatch(latch);
+    }
+    PG_RETURN_VOID();
+}
+
+PG_FUNCTION_INFO_V1(log_print);
+
+Datum log_print(PG_FUNCTION_ARGS)
+{
+    if (storage)
+    {
+        elog(NOTICE, "STORAGE CONTENT");  
+        elog(NOTICE, "--------------------------------------------------");
+        elog(NOTICE, "capacity %ld", storage->store_capacity);
+        elog(NOTICE, "size %ld", storage->size);
+        
+        for (size_t i = 0; i < storage->size; i++)
+            elog(NOTICE, "%d %s", (storage->store + i)->id, (storage->store + i)->name);     
+        
+        elog(NOTICE, "--------------------------------------------------");       
+    } 
+    PG_RETURN_VOID();
 }
 
 bool full()
 {
     bool res = false;
     LWLockAcquire(storage->lock, LW_SHARED);
-    if (storage->size < storage->capacity)
+    if (storage->size < storage->store_capacity)
         res = false;
     else
         res = true;
 
-    LWLockRelease(counterData->lock);
+    LWLockRelease(storage->lock);
     return res;
 }
 
@@ -159,18 +216,28 @@ void add_el(Entry *entry)
 {
     if (!entry)
         return;
-        
-    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
-    size_t pos = storage->size + 1;
-    
-    memcpy(storage->store[pos], entry, sizeof(Entry)); 
-    ++storage->size;
 
+    elog(NOTICE, "add_el");    
+
+    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+    size_t pos = storage->size;
+    elog(NOTICE, "pos %ld", pos);
+
+    memcpy(storage->store + pos, entry, sizeof(Entry)); 
+    
+    ++storage->size;
+    elog(NOTICE, "new_size %ld", storage->size);
     LWLockRelease(storage->lock);
 }
 
+/*   
+    typedef struct Entry
+    {
+        int32_t id;
+        char*   name;
+    } Entry;
 
-/*    typedef struct Storage 
+    typedef struct Storage 
     {
         LWLock* lock;
         size_t  store_capacity;

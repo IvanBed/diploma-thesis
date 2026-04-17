@@ -6,22 +6,39 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 PG_MODULE_MAGIC;
 
 static CounterData *counterData;
+static Latch       *latch;
 
-static void test_shmem_request()
+void request_shmem_shared_latch()
 {
-    if(prev_shmem_request_hook)
-        prev_shmem_request_hook();
+    RequestAddinShmemSpace(MAXALIGN(sizeof(Latch)));
+    RequestNamedLWLockTranche("shmem_shared_latch", 1);
+}
 
+void init_shared_latch_if_needed()
+{
+    bool found;
+
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+    latch = ShmemInitStruct("Latch", sizeof(Latch), &found);
+    if(!found) 
+    {
+        InitSharedLatch(latch); 
+        ResetLatch(latch);      
+    }
+
+    LWLockRelease(AddinShmemInitLock);
+}
+
+void request_shmem_counter_data()
+{
     RequestAddinShmemSpace(MAXALIGN(sizeof(CounterData)));
     RequestNamedLWLockTranche("shmem_chunk", 1);
 }
 
-static void test_shmem_startup()
+void init_counter_data_if_needed()
 {
     bool found;
-    
-    if(prev_shmem_startup_hook)
-        prev_shmem_startup_hook();
 
     LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
@@ -33,6 +50,26 @@ static void test_shmem_startup()
     }
 
     LWLockRelease(AddinShmemInitLock);
+}
+
+static void test_shmem_request()
+{
+    if(prev_shmem_request_hook)
+        prev_shmem_request_hook();
+
+    request_shmem_counter_data();
+
+    request_shmem_shared_latch();
+}
+
+static void test_shmem_startup()
+{
+    if(prev_shmem_startup_hook)
+        prev_shmem_startup_hook();
+    
+    init_counter_data_if_needed();
+
+    init_shared_latch_if_needed();
 }
 
 void atomic_increment()
@@ -89,12 +126,15 @@ void worker_main(Datum main_arg)
     // Подумать как прокинуть OID db динамически
     BackgroundWorkerInitializeConnection("postgres", NULL, 0);
 
+    // Передает право владения лэтчем из разделяемой памяти воркеру
+    OwnLatch(latch);
+
     size_t counter = 0;
     for (;;)
     {
         // Ожидание будет до сигнала от основного процесса
-        (void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1000, PG_WAIT_EXTENSION);
-        ResetLatch(MyLatch);
+        (void) WaitLatch(latch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10000000, PG_WAIT_EXTENSION);
+        ResetLatch(latch);
 
         CHECK_FOR_INTERRUPTS();
 
@@ -104,9 +144,8 @@ void worker_main(Datum main_arg)
             ProcessConfigFile(PGC_SIGHUP);
         }
         
-        atomic_get_counter_value();
-        if (counter % 100 == 0)
-            write_stats_to_table();
+        atomic_increment();
+        //write_stats_to_table();
 
         counter++;
     }
