@@ -34,7 +34,6 @@ void init_shared_latch_if_needed()
     LWLockRelease(AddinShmemInitLock);
 }
 
-
 void request_shmem_storage()
 {
     size_t storage_size   = sizeof(Storage);
@@ -51,12 +50,14 @@ void init_storage_shmem_if_needed()
     storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
     if(!found) 
 	{
-        storage->store_capacity = STORE_CAPACITY;
-        storage->size           = 0;
-        storage->store          = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
-        storage->lock           = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
+        storage->store_capacity    = STORE_CAPACITY;
+        storage->size              = 0;
+        storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
+        storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
+        storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
 
         memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
+        memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
     }
 
     LWLockRelease(AddinShmemInitLock);
@@ -90,8 +91,8 @@ static void test_shmem_request()
         prev_shmem_request_hook();
 
     request_shmem_counter_data();
+    
     request_shmem_storage();
-
     request_shmem_shared_latch();
 }
 
@@ -101,8 +102,8 @@ static void test_shmem_startup()
         prev_shmem_startup_hook();
 
     init_counter_data_if_needed();
+    
     init_storage_shmem_if_needed();
-
     init_shared_latch_if_needed();
 }
 
@@ -164,7 +165,6 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     elog(NOTICE, "id  %d", id);  
     elog(NOTICE, "name  %s", name); 
     
-
     if (!full())
     {
         Entry entry;
@@ -228,6 +228,44 @@ void add_el(Entry *entry)
     ++storage->size;
     elog(NOTICE, "new_size %ld", storage->size);
     LWLockRelease(storage->lock);
+}
+
+int find_pos()
+{
+    LWLockAcquire(storage->lock, LW_SHARED);
+    for (size_t pos = 0; pos < store->capacity; pos++)
+    {
+        if (free_space_bitmap[pos] == FREE)
+            return pos;
+
+    }
+    LWLockRelease(storage->lock);
+    return STORAGE_FULL;
+}
+
+void add_el_new(Entry *entry)
+{
+    if (!entry)
+        return;
+
+    elog(NOTICE, "add_el");    
+    
+    size_t pos = find_pos();
+    elog(NOTICE, "pos %ld", pos);
+    if (pos != STORAGE_FULL)
+    {
+        LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+
+        memcpy(storage->store + pos, entry, sizeof(Entry));       
+        ++storage->size;
+        free_space_bitmap[pos] = ALLOCATED;
+        elog(NOTICE, "new_size %ld", storage->size);
+        LWLockRelease(storage->lock);
+    }
+    else
+    {
+        // wait for worker
+    }
 }
 
 /*   

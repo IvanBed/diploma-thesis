@@ -33,4 +33,21 @@
         int32_t counter;
     } CounterData;
 
+    typedef struct Entry
+    {
+        int32_t id;
+        char*   name;
+    } Entry;
+
+    typedef struct Storage 
+    {
+        LWLock* lock;
+        size_t  store_capacity;
+        size_t  size;
+        Entry   *store;
+        bool    *free_space_bitmap;
+        MemoryContext storage_mem_cxt;
+    
+    } Storage;
+
 #endif

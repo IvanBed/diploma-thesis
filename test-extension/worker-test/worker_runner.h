@@ -19,7 +19,9 @@
     #include "postmaster/bgworker.h"
     #include "postmaster/interrupt.h"
 
-    
+    #define FREE 0 
+    #define ALLOCATED 1
+    #define STORAGE_FULL -1
 
     typedef struct CounterData 
     {
@@ -38,9 +40,10 @@
         LWLock* lock;
         size_t  store_capacity;
         size_t  size;
-        Entry   *store;    
+        Entry   *store;
+        uint8_t    *free_space_bitmap;
         MemoryContext storage_mem_cxt;
-
+    
     } Storage;
 
 #endif

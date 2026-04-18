@@ -5,8 +5,9 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
 
-static CounterData *counterData;
-static Latch       *latch;
+static CounterData *counterData = NULL;
+static Storage     *storage     = NULL;
+static Latch       *latch       = NULL;
 
 void request_shmem_shared_latch()
 {
@@ -52,13 +53,43 @@ void init_counter_data_if_needed()
     LWLockRelease(AddinShmemInitLock);
 }
 
+void request_shmem_storage()
+{
+    size_t storage_size   = sizeof(Storage);
+
+    RequestAddinShmemSpace(MAXALIGN(storage_size));
+    RequestNamedLWLockTranche("shmem_storage_chunk", 1);
+}
+
+void init_storage_shmem_if_needed()
+{
+    bool found;
+    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+    storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
+    if(!found) 
+	{
+        storage->store_capacity    = STORE_CAPACITY;
+        storage->size              = 0;
+        storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
+        storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
+        storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
+
+        memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
+        memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
+    }
+
+    LWLockRelease(AddinShmemInitLock);
+}
+
 static void test_shmem_request()
 {
     if(prev_shmem_request_hook)
         prev_shmem_request_hook();
 
     request_shmem_counter_data();
-
+    
+    request_shmem_storage();
     request_shmem_shared_latch();
 }
 
@@ -68,7 +99,8 @@ static void test_shmem_startup()
         prev_shmem_startup_hook();
     
     init_counter_data_if_needed();
-
+    
+    init_storage_shmem_if_needed()
     init_shared_latch_if_needed();
 }
 
@@ -115,6 +147,44 @@ void write_stats_to_table()
     CommitTransactionCommand();
     
     pfree(buf.data);
+}
+
+void write_data_to_rel()
+{
+    int ret[store_capacity];
+
+    StringInfoData buf;
+ 
+    SetCurrentStatementStartTimestamp();
+    
+    StartTransactionCommand();
+    SPI_connect();
+    PushActiveSnapshot(GetTransactionSnapshot());
+
+    LWLockAcquire(storage->lock, LW_SHARED);
+
+    for(size_t i = 0; i < store_capacity; i++)
+    {
+        if (free_space_bitmap[i] == ALLOCATED)
+        {
+            initStringInfo(&buf);
+            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, storage->store[i].name);
+            ret[i] = SPI_execute(buf.data, false, 0);
+            pfree(buf.data);
+        }
+    }
+    LWLockRelease(storage->lock);
+    PopActiveSnapshot();
+    SPI_finish();
+    CommitTransactionCommand();
+
+    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+    
+    for (size_t i = 0; i < store_capacity; i++)
+        if (ret[i] == SPI_OK_INSERT)
+            free_space_bitmap[i] = FREE;
+    
+    LWLockRelease(storage->lock); 
 }
 
 void worker_main(Datum main_arg)
