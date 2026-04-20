@@ -12,6 +12,7 @@ static Latch       *latch       = NULL;
 
 bool full(void);
 void add_el(Entry *);
+void add_el_new(Entry *);
 
 void request_shmem_shared_latch()
 {
@@ -170,7 +171,7 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
         Entry entry;
         entry.id   = id;
         entry.name = "name";
-        add_el(&entry);
+        add_el_new(&entry);
     }
     else 
     {
@@ -232,15 +233,18 @@ void add_el(Entry *entry)
 
 int find_pos()
 {
+    int res_pos = STORAGE_FULL;
     LWLockAcquire(storage->lock, LW_SHARED);
-    for (size_t pos = 0; pos < storage->store_capacity; pos++)
+    for (size_t i = 0; i < storage->store_capacity; i++)
     {
-        if (storage->free_space_bitmap[pos] == FREE)
-            return pos;
-
+        if (storage->free_space_bitmap[i] == FREE)
+        {
+            pos = (int) i;
+            break;
+        }
     }
     LWLockRelease(storage->lock);
-    return STORAGE_FULL;
+    return res_pos;
 }
 
 void add_el_new(Entry *entry)
@@ -248,9 +252,9 @@ void add_el_new(Entry *entry)
     if (!entry)
         return;
 
-    elog(NOTICE, "add_el");    
+    elog(NOTICE, "add_el_new");    
     
-    size_t pos = find_pos();
+    int pos = find_pos();
     elog(NOTICE, "pos %ld", pos);
     if (pos != STORAGE_FULL)
     {
@@ -264,7 +268,8 @@ void add_el_new(Entry *entry)
     }
     else
     {
-        // wait for worker
+        elog(NOTICE, "wait for worker");    
+        // 
     }
 }
 
