@@ -233,9 +233,9 @@ void add_el(Entry *entry)
 int find_pos()
 {
     LWLockAcquire(storage->lock, LW_SHARED);
-    for (size_t pos = 0; pos < store->capacity; pos++)
+    for (size_t pos = 0; pos < storage->store_capacity; pos++)
     {
-        if (free_space_bitmap[pos] == FREE)
+        if (storage->free_space_bitmap[pos] == FREE)
             return pos;
 
     }
@@ -258,7 +258,7 @@ void add_el_new(Entry *entry)
 
         memcpy(storage->store + pos, entry, sizeof(Entry));       
         ++storage->size;
-        free_space_bitmap[pos] = ALLOCATED;
+        storage->free_space_bitmap[pos] = ALLOCATED;
         elog(NOTICE, "new_size %ld", storage->size);
         LWLockRelease(storage->lock);
     }

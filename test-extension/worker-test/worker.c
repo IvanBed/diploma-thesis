@@ -1,4 +1,5 @@
 #include "worker.h"
+#define STORE_CAPACITY 5
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -100,7 +101,7 @@ static void test_shmem_startup()
     
     init_counter_data_if_needed();
     
-    init_storage_shmem_if_needed()
+    init_storage_shmem_if_needed();
     init_shared_latch_if_needed();
 }
 
@@ -151,8 +152,14 @@ void write_stats_to_table()
 
 void write_data_to_rel()
 {
-    int ret[store_capacity];
-
+    size_t ret_arr_size = sizeof(int) * storage->store_capacity;
+    int *ret            = palloc(ret_arr_size);
+    
+    if (!ret)
+    {
+        elog(WARNING, "Could not allocate memort for return codes array"); 
+    }
+    memset(ret, 0, ret_arr_size);
     StringInfoData buf;
  
     SetCurrentStatementStartTimestamp();
@@ -163,9 +170,9 @@ void write_data_to_rel()
 
     LWLockAcquire(storage->lock, LW_SHARED);
 
-    for(size_t i = 0; i < store_capacity; i++)
+    for(size_t i = 0; i < storage->store_capacity; i++)
     {
-        if (free_space_bitmap[i] == ALLOCATED)
+        if (storage->free_space_bitmap[i] == ALLOCATED)
         {
             initStringInfo(&buf);
             appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, storage->store[i].name);
@@ -180,11 +187,13 @@ void write_data_to_rel()
 
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
-    for (size_t i = 0; i < store_capacity; i++)
+    for (size_t i = 0; i < storage->store_capacity; i++)
         if (ret[i] == SPI_OK_INSERT)
-            free_space_bitmap[i] = FREE;
+            storage->free_space_bitmap[i] = FREE;
     
-    LWLockRelease(storage->lock); 
+    LWLockRelease(storage->lock);
+
+    pfree(ret_arr_size); 
 }
 
 void worker_main(Datum main_arg)

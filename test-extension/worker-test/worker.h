@@ -27,6 +27,10 @@
 
     #define TABLE_NAME "test_table"
 
+    #define FREE 0 
+    #define ALLOCATED 1
+    #define STORAGE_FULL -1
+
     typedef struct CounterData 
     {
         LWLock* lock;
