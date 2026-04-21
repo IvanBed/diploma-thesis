@@ -82,11 +82,6 @@ void write_data_to_rel()
     size_t ret_arr_size = sizeof(int) * storage->store_capacity;
     
     int *ret            = (int*) palloc(ret_arr_size);
-
-    if (!ret)
-    {
-        elog(WARNING, "Could not allocate memort for return codes array"); 
-    }
     memset(ret, 0, ret_arr_size);
     
     SetCurrentStatementStartTimestamp();
@@ -125,7 +120,8 @@ void write_data_to_rel()
 
     LWLockRelease(storage->lock);
     
-    pfree(ret); 
+    if(ret)
+        pfree(ret); 
 }
 
 void worker_main(Datum main_arg)
