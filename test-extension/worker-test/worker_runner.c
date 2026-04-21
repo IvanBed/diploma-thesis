@@ -239,7 +239,7 @@ int find_pos()
     {
         if (storage->free_space_bitmap[i] == FREE)
         {
-            pos = (int) i;
+            res_pos = (int) i;
             break;
         }
     }
