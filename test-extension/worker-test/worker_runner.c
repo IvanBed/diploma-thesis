@@ -166,18 +166,11 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     elog(NOTICE, "id  %d", id);  
     elog(NOTICE, "name  %s", name); 
     
-    if (!full())
-    {
-        Entry entry;
-        entry.id   = id;
-        entry.name = "name";
-        add_el_new(&entry);
-    }
-    else 
-    {
-        elog(NOTICE, "SetLatch"); 
-        SetLatch(latch);
-    }
+    Entry entry;
+    entry.id   = id;
+    entry.name = "name";
+    add_el_new(&entry);
+
     PG_RETURN_VOID();
 }
 
@@ -192,9 +185,11 @@ Datum log_print(PG_FUNCTION_ARGS)
         elog(NOTICE, "capacity %ld", storage->store_capacity);
         elog(NOTICE, "size %ld", storage->size);
         
-        for (size_t i = 0; i < storage->size; i++)
-            elog(NOTICE, "%d %s", (storage->store + i)->id, (storage->store + i)->name);     
-        
+        for (size_t i = 0; i < storage->store_capacity; i++)
+        {
+            if (storage->free_space_bitmap[i] == ALLOCATED)
+                elog(NOTICE, "%d %s", (storage->store + i)->id, (storage->store + i)->name); 
+        } 
         elog(NOTICE, "--------------------------------------------------");       
     } 
     PG_RETURN_VOID();
@@ -247,6 +242,16 @@ int find_pos()
     return res_pos;
 }
 
+void add_el_internal(Entry *entry, size_t pos)
+{
+    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+    memcpy(storage->store + pos, entry, sizeof(Entry));       
+    ++storage->size;
+    storage->free_space_bitmap[pos] = ALLOCATED;
+    elog(NOTICE, "new_size %ld", storage->size);
+    LWLockRelease(storage->lock);
+}
+
 void add_el_new(Entry *entry)
 {
     if (!entry)
@@ -258,18 +263,16 @@ void add_el_new(Entry *entry)
     elog(NOTICE, "pos %ld", pos);
     if (pos != STORAGE_FULL)
     {
-        LWLockAcquire(storage->lock, LW_EXCLUSIVE);
-
-        memcpy(storage->store + pos, entry, sizeof(Entry));       
-        ++storage->size;
-        storage->free_space_bitmap[pos] = ALLOCATED;
-        elog(NOTICE, "new_size %ld", storage->size);
-        LWLockRelease(storage->lock);
+        add_el_internal(entry, pos);
     }
     else
     {
         elog(NOTICE, "wait for worker");    
-        // 
+        elog(NOTICE, "SetLatch"); 
+        SetLatch(latch);
+        // костыл для теста, поменять
+        while ((pos = find_pos()) == STORAGE_FULL) {}
+        add_el_internal(entry, pos);
     }
 }
 
@@ -285,7 +288,8 @@ void add_el_new(Entry *entry)
         LWLock* lock;
         size_t  store_capacity;
         size_t  size;
-        Entry   *store;    
+        Entry   *store;
+        uint8_t    *free_space_bitmap;
         MemoryContext storage_mem_cxt;
-
-    } Storage;*/
+    
+    } Storage*/

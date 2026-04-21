@@ -153,15 +153,15 @@ void write_stats_to_table()
 void write_data_to_rel()
 {
     size_t ret_arr_size = sizeof(int) * storage->store_capacity;
-    int *ret            = palloc(ret_arr_size);
     
+    int *ret            = (int*) palloc(ret_arr_size);
+
     if (!ret)
     {
         elog(WARNING, "Could not allocate memort for return codes array"); 
     }
     memset(ret, 0, ret_arr_size);
-    StringInfoData buf;
- 
+    
     SetCurrentStatementStartTimestamp();
     
     StartTransactionCommand();
@@ -174,6 +174,7 @@ void write_data_to_rel()
     {
         if (storage->free_space_bitmap[i] == ALLOCATED)
         {
+            StringInfoData buf;
             initStringInfo(&buf);
             appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, storage->store[i].name);
             ret[i] = SPI_execute(buf.data, false, 0);
@@ -188,12 +189,17 @@ void write_data_to_rel()
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
     for (size_t i = 0; i < storage->store_capacity; i++)
+    {
         if (ret[i] == SPI_OK_INSERT)
+        {
             storage->free_space_bitmap[i] = FREE;
-    
-    LWLockRelease(storage->lock);
+            --storage->size;
+        }
+    }
 
-    pfree(ret_arr_size); 
+    LWLockRelease(storage->lock);
+    
+    pfree(ret); 
 }
 
 void worker_main(Datum main_arg)
@@ -208,11 +214,10 @@ void worker_main(Datum main_arg)
     // Передает право владения лэтчем из разделяемой памяти воркеру
     OwnLatch(latch);
 
-    size_t counter = 0;
     for (;;)
     {
         // Ожидание будет до сигнала от основного процесса
-        (void) WaitLatch(latch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 10000000, PG_WAIT_EXTENSION);
+        (void) WaitLatch(latch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH, 1000, PG_WAIT_EXTENSION);
         ResetLatch(latch);
 
         CHECK_FOR_INTERRUPTS();
@@ -223,10 +228,7 @@ void worker_main(Datum main_arg)
             ProcessConfigFile(PGC_SIGHUP);
         }
         
-        atomic_increment();
-        //write_stats_to_table();
-
-        counter++;
+        write_data_to_rel();
     }
 }
 
