@@ -6,7 +6,6 @@ static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
 
-static CounterData *counterData = NULL;
 static Storage     *storage     = NULL;
 static Latch       *latch       = NULL;
 
@@ -32,28 +31,6 @@ void init_shared_latch_if_needed()
     LWLockRelease(AddinShmemInitLock);
 }
 
-void request_shmem_counter_data()
-{
-    RequestAddinShmemSpace(MAXALIGN(sizeof(CounterData)));
-    RequestNamedLWLockTranche("shmem_chunk", 1);
-}
-
-void init_counter_data_if_needed()
-{
-    bool found;
-
-    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-
-    counterData = ShmemInitStruct("CounterData", sizeof(CounterData), &found);
-    if(!found) 
-	{
-        counterData->counter = 0;
-        counterData->lock = &(GetNamedLWLockTranche("shmem_chunk"))->lock;
-    }
-
-    LWLockRelease(AddinShmemInitLock);
-}
-
 void request_shmem_storage()
 {
     size_t storage_size   = sizeof(Storage);
@@ -71,7 +48,6 @@ void init_storage_shmem_if_needed()
     if(!found) 
 	{
         storage->store_capacity    = STORE_CAPACITY;
-        storage->size              = 0;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
         storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
@@ -88,8 +64,6 @@ static void test_shmem_request()
     if(prev_shmem_request_hook)
         prev_shmem_request_hook();
 
-    request_shmem_counter_data();
-    
     request_shmem_storage();
     request_shmem_shared_latch();
 }
@@ -98,8 +72,6 @@ static void test_shmem_startup()
 {
     if(prev_shmem_startup_hook)
         prev_shmem_startup_hook();
-    
-    init_counter_data_if_needed();
     
     init_storage_shmem_if_needed();
     init_shared_latch_if_needed();
@@ -122,32 +94,6 @@ int32_t atomic_get_counter_value()
     LWLockRelease(counterData->lock);
    
     return result;
-}
-
-void write_stats_to_table()
-{
-    int ret;
-    StringInfoData buf;
-    int32_t id = atomic_get_counter_value();
-    
-    SetCurrentStatementStartTimestamp();
-    
-    StartTransactionCommand();
-    SPI_connect();
-    PushActiveSnapshot(GetTransactionSnapshot());
-    
-    initStringInfo(&buf);
-    appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, 'test')", TABLE_NAME, id);
-    
-    ret = SPI_execute(buf.data, false, 0);
-    if (ret != SPI_OK_INSERT)
-        elog(WARNING, "SPI_execute failed: error code %d", ret);
-    
-    PopActiveSnapshot();
-    SPI_finish();
-    CommitTransactionCommand();
-    
-    pfree(buf.data);
 }
 
 void write_data_to_rel()
@@ -193,7 +139,6 @@ void write_data_to_rel()
         if (ret[i] == SPI_OK_INSERT)
         {
             storage->free_space_bitmap[i] = FREE;
-            --storage->size;
         }
     }
 

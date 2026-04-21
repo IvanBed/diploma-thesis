@@ -39,7 +39,6 @@
     {
         LWLock* lock;
         size_t  store_capacity;
-        size_t  size;
         Entry   *store;
         uint8_t    *free_space_bitmap;
         MemoryContext storage_mem_cxt;

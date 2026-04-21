@@ -5,8 +5,8 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
-//Проверить можно ли
-static CounterData *counterData = NULL;
+
+
 static Storage     *storage     = NULL;
 static Latch       *latch       = NULL;
 
@@ -52,7 +52,6 @@ void init_storage_shmem_if_needed()
     if(!found) 
 	{
         storage->store_capacity    = STORE_CAPACITY;
-        storage->size              = 0;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
         storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
@@ -64,35 +63,11 @@ void init_storage_shmem_if_needed()
     LWLockRelease(AddinShmemInitLock);
 }
 
-void request_shmem_counter_data()
-{
-    RequestAddinShmemSpace(MAXALIGN(sizeof(CounterData)));
-    RequestNamedLWLockTranche("shmem_chunk", 1);
-}
-
-void init_counter_data_if_needed()
-{
-    bool found;
-
-    LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-
-    counterData = ShmemInitStruct("CounterData", sizeof(CounterData), &found);
-    if(!found) 
-	{
-        counterData->counter = 0;
-        counterData->lock = &(GetNamedLWLockTranche("shmem_chunk"))->lock;
-    }
-
-    LWLockRelease(AddinShmemInitLock);
-}
-
 static void test_shmem_request()
 {
     if(prev_shmem_request_hook)
         prev_shmem_request_hook();
-
-    request_shmem_counter_data();
-    
+  
     request_shmem_storage();
     request_shmem_shared_latch();
 }
@@ -101,8 +76,6 @@ static void test_shmem_startup()
 {
     if(prev_shmem_startup_hook)
         prev_shmem_startup_hook();
-
-    init_counter_data_if_needed();
     
     init_storage_shmem_if_needed();
     init_shared_latch_if_needed();
@@ -183,7 +156,6 @@ Datum log_print(PG_FUNCTION_ARGS)
         elog(NOTICE, "STORAGE CONTENT");  
         elog(NOTICE, "--------------------------------------------------");
         elog(NOTICE, "capacity %ld", storage->store_capacity);
-        elog(NOTICE, "size %ld", storage->size);
         
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
@@ -193,37 +165,6 @@ Datum log_print(PG_FUNCTION_ARGS)
         elog(NOTICE, "--------------------------------------------------");       
     } 
     PG_RETURN_VOID();
-}
-
-bool full()
-{
-    bool res = false;
-    LWLockAcquire(storage->lock, LW_SHARED);
-    if (storage->size < storage->store_capacity)
-        res = false;
-    else
-        res = true;
-
-    LWLockRelease(storage->lock);
-    return res;
-}
-
-void add_el(Entry *entry)
-{
-    if (!entry)
-        return;
-
-    elog(NOTICE, "add_el");    
-
-    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
-    size_t pos = storage->size;
-    elog(NOTICE, "pos %ld", pos);
-
-    memcpy(storage->store + pos, entry, sizeof(Entry)); 
-    
-    ++storage->size;
-    elog(NOTICE, "new_size %ld", storage->size);
-    LWLockRelease(storage->lock);
 }
 
 int find_pos()
@@ -246,9 +187,7 @@ void add_el_internal(Entry *entry, size_t pos)
 {
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     memcpy(storage->store + pos, entry, sizeof(Entry));       
-    ++storage->size;
     storage->free_space_bitmap[pos] = ALLOCATED;
-    elog(NOTICE, "new_size %ld", storage->size);
     LWLockRelease(storage->lock);
 }
 
