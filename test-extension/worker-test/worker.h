@@ -22,7 +22,8 @@
     #include "utils/guc.h"
     #include <utils/rel.h>
     #include <utils/snapmgr.h>
-    
+    #include "utils/dsa.h"
+
     #include "libpq/pqsignal.h"
 
     #define TABLE_NAME "test_table"
@@ -31,20 +32,31 @@
     #define ALLOCATED 1
     #define STORAGE_FULL -1
 
+    #define STORE_CAPACITY 25
+    #define TEXT_STORE_MAX_SIZE 16384
+
+
     typedef struct Entry
     {
         int32_t id;
-        char*   name;
+        union
+	    {
+		    dsa_pointer text_pos;	/* text location within text buffer */
+		    char	   *text_pointer;
+	     }	test_text;
     } Entry;
 
     typedef struct Storage 
     {
-        LWLock* lock;
-        size_t  store_capacity;
-        Entry   *store;
-        bool    *free_space_bitmap;
+        LWLock       *lock;
+        size_t        store_capacity;
+        Entry        *store;
+        uint8_t      *free_space_bitmap;
+        
+        dsa_area     *dsa;
+        void         *raw_dsa_area;
+        
         MemoryContext storage_mem_cxt;
-    
     } Storage;
 
 #endif

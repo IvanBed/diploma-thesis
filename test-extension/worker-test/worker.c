@@ -47,10 +47,21 @@ void init_storage_shmem_if_needed()
     storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
     if(!found) 
 	{
+        char *p = (char *) storage;
+        
         storage->store_capacity    = STORE_CAPACITY;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
         storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
+
+        p += MAXALIGN(sizeof(Storage));
+		storage->raw_dsa_area = p;
+		storage->dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
+		
+        dsa_pin(storage->dsa);
+		dsa_set_size_limit(storage->dsa, TEXT_STORE_MAX_SIZE);
+         
+        dsa_detach(storage->dsa);
 
         memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
         memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
@@ -103,7 +114,7 @@ void write_data_to_rel()
         {
             StringInfoData buf;
             initStringInfo(&buf);
-            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, storage->store[i].name);
+            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, "TEST VAL LATCH");
             ret[i] = SPI_execute(buf.data, false, 0);
             pfree(buf.data);
         }

@@ -1,5 +1,4 @@
 #include "worker_runner.h"
-#define STORE_CAPACITY 25
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -49,10 +48,21 @@ void init_storage_shmem_if_needed()
     storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
     if(!found) 
 	{
+        char *p = (char *) storage;
+        
         storage->store_capacity    = STORE_CAPACITY;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
         storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
+
+        p += MAXALIGN(sizeof(Storage));
+		storage->raw_dsa_area = p;
+		storage->dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
+		
+        dsa_pin(storage->dsa);
+		dsa_set_size_limit(storage->dsa, TEXT_STORE_MAX_SIZE);
+         
+        dsa_detach(storage->dsa);
 
         memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
         memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
@@ -125,7 +135,7 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     
     Entry entry;
     entry.id   = id;
-    entry.name = "name";
+    //entry.name = "name";
     add_el(&entry);
 
     PG_RETURN_VOID();
@@ -144,11 +154,32 @@ Datum log_print(PG_FUNCTION_ARGS)
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
             if (storage->free_space_bitmap[i] == ALLOCATED)
-                elog(NOTICE, "%d %s", (storage->store + i)->id, (storage->store + i)->name); 
+                elog(NOTICE, "%d %s", (storage->store + i)->id, "TEST LATCH"); 
         } 
         elog(NOTICE, "--------------------------------------------------");       
     } 
     PG_RETURN_VOID();
+}
+
+void attach_shmem(void)
+{
+	MemoryContext oldcontext;
+
+	if (storage->dsa)
+		return;
+
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	storage->dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
+	dsa_pin_mapping(storage->dsa);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+dsa_area *get_dsa_area_for_text(void)
+{
+	attach_shmem();
+	return storage->dsa;
 }
 
 int find_pos()
@@ -208,10 +239,14 @@ void add_el(Entry *entry)
 
     typedef struct Storage 
     {
-        LWLock* lock;
-        size_t  store_capacity;
-        Entry   *store;
-        uint8_t    *free_space_bitmap;
+        LWLock       *lock;
+        size_t        store_capacity;
+        Entry        *store;
+        uint8_t      *free_space_bitmap;
+        
+        dsa_area     *dsa;
+        void         *raw_dsa_area;
+        
         MemoryContext storage_mem_cxt;
-    
-    } Storage*/
+    } Storage;
+*/
