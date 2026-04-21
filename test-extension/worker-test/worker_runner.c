@@ -1,18 +1,16 @@
 #include "worker_runner.h"
-#define STORE_CAPACITY 5
+#define STORE_CAPACITY 25
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
 PG_MODULE_MAGIC;
 
-
 static Storage     *storage     = NULL;
 static Latch       *latch       = NULL;
 
 bool full(void);
 void add_el(Entry *);
-void add_el_new(Entry *);
 
 void request_shmem_shared_latch()
 {
@@ -94,7 +92,6 @@ void init_worker(BackgroundWorker *worker)
     (*worker).bgw_notify_pid = 0;
     snprintf((*worker).bgw_name, BGW_MAXLEN, "worker worker %d", 1);
     snprintf((*worker).bgw_type, BGW_MAXLEN, "worker");
-    //(*worker).bgw_main_arg = PointerGetDatum(counterData);
 }
 
 void _PG_init()
@@ -115,20 +112,7 @@ void _PG_init()
     RegisterBackgroundWorker(&worker); 
 }
 
-PG_FUNCTION_INFO_V1(get_counter_value);
-
-Datum get_counter_value(PG_FUNCTION_ARGS)
-{
-    int32_t result;
-
-    LWLockAcquire(counterData->lock, LW_SHARED);
-    result = counterData->counter;
-    LWLockRelease(counterData->lock);
-    PG_RETURN_INT32(result);
-}
-
 PG_FUNCTION_INFO_V1(set_store_entry);
-
 Datum set_store_entry(PG_FUNCTION_ARGS)
 {
     // проверка на null
@@ -142,7 +126,7 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     Entry entry;
     entry.id   = id;
     entry.name = "name";
-    add_el_new(&entry);
+    add_el(&entry);
 
     PG_RETURN_VOID();
 }
@@ -191,12 +175,12 @@ void add_el_internal(Entry *entry, size_t pos)
     LWLockRelease(storage->lock);
 }
 
-void add_el_new(Entry *entry)
+void add_el(Entry *entry)
 {
     if (!entry)
         return;
 
-    elog(NOTICE, "add_el_new");    
+    elog(NOTICE, "add_el");    
     
     int pos = find_pos();
     elog(NOTICE, "pos %ld", pos);
@@ -226,7 +210,6 @@ void add_el_new(Entry *entry)
     {
         LWLock* lock;
         size_t  store_capacity;
-        size_t  size;
         Entry   *store;
         uint8_t    *free_space_bitmap;
         MemoryContext storage_mem_cxt;

@@ -77,25 +77,6 @@ static void test_shmem_startup()
     init_shared_latch_if_needed();
 }
 
-void atomic_increment()
-{
-
-    LWLockAcquire(counterData->lock, LW_EXCLUSIVE);
-    counterData->counter++;
-    LWLockRelease(counterData->lock);
-}
-
-int32_t atomic_get_counter_value()
-{
-    int32_t result;
-
-    LWLockAcquire(counterData->lock, LW_SHARED);
-    result = counterData->counter;
-    LWLockRelease(counterData->lock);
-   
-    return result;
-}
-
 void write_data_to_rel()
 {
     size_t ret_arr_size = sizeof(int) * storage->store_capacity;

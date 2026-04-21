@@ -23,12 +23,6 @@
     #define ALLOCATED 1
     #define STORAGE_FULL -1
 
-    typedef struct CounterData 
-    {
-        LWLock* lock;
-        int32_t counter;
-    } CounterData;
-
     typedef struct Entry
     {
         int32_t id;
