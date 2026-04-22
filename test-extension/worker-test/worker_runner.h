@@ -12,6 +12,7 @@
     #include "storage/proc.h"
 
     #include "utils/builtins.h"
+    #include "utils/memutils.h"
     #include "utils/dsa.h"
 
     #include "nodes/pg_list.h"
@@ -20,12 +21,14 @@
     #include "postmaster/bgworker.h"
     #include "postmaster/interrupt.h"
 
+    #include <string.h>
+
     #define FREE 0 
     #define ALLOCATED 1
     #define STORAGE_FULL -1
 
     #define STORE_CAPACITY 25
-    #define TEXT_STORE_MAX_SIZE 16384
+    #define TEXT_STORE_MAX_SIZE 1024 * 1024
 
     typedef struct Entry
     {
@@ -34,7 +37,7 @@
 	    {
 		    dsa_pointer text_pos;	/* text location within text buffer */
 		    char	   *text_pointer;
-	     }	test_text;
+	    }	test_text;
     } Entry;
 
     typedef struct Storage 

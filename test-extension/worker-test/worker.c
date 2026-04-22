@@ -1,5 +1,5 @@
 #include "worker.h"
-#define STORE_CAPACITY 5
+
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -47,6 +47,7 @@ void init_storage_shmem_if_needed()
     storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
     if(!found) 
 	{
+        dsa_area   *dsa;
         char *p = (char *) storage;
         
         storage->store_capacity    = STORE_CAPACITY;
@@ -56,12 +57,13 @@ void init_storage_shmem_if_needed()
 
         p += MAXALIGN(sizeof(Storage));
 		storage->raw_dsa_area = p;
-		storage->dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
 		
-        dsa_pin(storage->dsa);
-		dsa_set_size_limit(storage->dsa, TEXT_STORE_MAX_SIZE);
+        dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
+		
+        dsa_pin(dsa);
+		dsa_set_size_limit(dsa, TEXT_STORE_MAX_SIZE);
          
-        dsa_detach(storage->dsa);
+        dsa_detach(dsa);
 
         memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
         memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
@@ -119,17 +121,26 @@ void write_data_to_rel()
             pfree(buf.data);
         }
     }
+
     LWLockRelease(storage->lock);
+
     PopActiveSnapshot();
     SPI_finish();
     CommitTransactionCommand();
 
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
+    dsa_area     *dsa;
+    dsa_pointer   dsa_text_pointer;
     for (size_t i = 0; i < storage->store_capacity; i++)
     {
+        // Удаляем строку из динамической разделяемой памяти и помечаем позиции в store как свободную.
         if (ret[i] == SPI_OK_INSERT)
         {
+            /*dsa_text_pointer = storage->store[i].test_text.text_pos;
+            if(DsaPointerIsValid(dsa_text_pointer))
+                dsa_free(storage->dsa, dsa_text_pointer);*/
+            
             storage->free_space_bitmap[i] = FREE;
         }
     }

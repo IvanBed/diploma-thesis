@@ -33,6 +33,4 @@ EXPOSE 5432
 
 ENTRYPOINT ["./entrypoint.sh"] 
 
-
-    
  

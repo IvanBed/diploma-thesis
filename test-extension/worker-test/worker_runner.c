@@ -48,6 +48,7 @@ void init_storage_shmem_if_needed()
     storage = ShmemInitStruct("Storage", sizeof(Storage), &found);
     if(!found) 
 	{
+        dsa_area   *dsa;
         char *p = (char *) storage;
         
         storage->store_capacity    = STORE_CAPACITY;
@@ -57,12 +58,13 @@ void init_storage_shmem_if_needed()
 
         p += MAXALIGN(sizeof(Storage));
 		storage->raw_dsa_area = p;
-		storage->dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
 		
-        dsa_pin(storage->dsa);
-		dsa_set_size_limit(storage->dsa, TEXT_STORE_MAX_SIZE);
+        dsa = dsa_create_in_place(storage->raw_dsa_area, TEXT_STORE_MAX_SIZE, LWLockNewTrancheId(), 0);
+		
+        dsa_pin(dsa);
+		dsa_set_size_limit(dsa, TEXT_STORE_MAX_SIZE);
          
-        dsa_detach(storage->dsa);
+        dsa_detach(dsa);
 
         memset(storage->store, 0, sizeof(Entry) * STORE_CAPACITY);
         memset(storage->free_space_bitmap, 0, sizeof(uint8_t) * STORE_CAPACITY);
@@ -70,6 +72,7 @@ void init_storage_shmem_if_needed()
 
     LWLockRelease(AddinShmemInitLock);
 }
+
 
 static void test_shmem_request()
 {
@@ -135,7 +138,7 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     
     Entry entry;
     entry.id   = id;
-    //entry.name = "name";
+    entry.test_text.text_pointer = name;
     add_el(&entry);
 
     PG_RETURN_VOID();
@@ -153,8 +156,9 @@ Datum log_print(PG_FUNCTION_ARGS)
         
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
+            char *text = dsa_get_address(storage->dsa, (storage->store + i)->test_text.text_pos);
             if (storage->free_space_bitmap[i] == ALLOCATED)
-                elog(NOTICE, "%d %s", (storage->store + i)->id, "TEST LATCH"); 
+                elog(NOTICE, "%d %s", (storage->store + i)->id, text); 
         } 
         elog(NOTICE, "--------------------------------------------------");       
     } 
@@ -163,11 +167,13 @@ Datum log_print(PG_FUNCTION_ARGS)
 
 void attach_shmem(void)
 {
-	MemoryContext oldcontext;
+	elog(NOTICE, "STEP 2: attach_shmem 1");  
+    MemoryContext oldcontext;
 
 	if (storage->dsa)
 		return;
-
+    
+    elog(NOTICE, "STEP 2: attach_shmem 2"); 
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 	storage->dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
@@ -200,9 +206,43 @@ int find_pos()
 
 void add_el_internal(Entry *entry, size_t pos)
 {
+    if (!entry)
+    {
+        return;
+    }
+
+    char	   *text_buff;
+    dsa_area   *text_dsa_area;
+    dsa_pointer text_dsa_pointer;
+    
+    size_t      text_len;
+    char       *text;
+    
+    elog(NOTICE, "STEP 1: get text from entry");  
+    text     = entry->test_text.text_pointer;
+    text_len = strlen(text);
+    elog(NOTICE, "text %s len %d", text, text_len); 
+
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+
+    elog(NOTICE, "STEP 2: init dsa area");  
+	text_dsa_area = get_dsa_area_for_text();
+
+    elog(NOTICE, "STEP 2: dsa_allocate_extended");  
+    text_dsa_pointer = dsa_allocate_extended(text_dsa_area, text_len + 1,  DSA_ALLOC_ZERO);
+    elog(NOTICE, "STEP 2: end"); 
+    if (DsaPointerIsValid(text_dsa_pointer))
+    {
+        elog(NOTICE, "STEP 3: store text in dsa area");  
+        text_buff = dsa_get_address(text_dsa_area, text_dsa_pointer);
+        memcpy(text_buff, text, text_len);
+        text_buff[text_len] = 0;
+        entry->test_text.text_pos = text_dsa_pointer;
+    } 
+    elog(NOTICE, "STEP 4: copy entry struct into shared mem");  
     memcpy(storage->store + pos, entry, sizeof(Entry));       
     storage->free_space_bitmap[pos] = ALLOCATED;
+
     LWLockRelease(storage->lock);
 }
 
@@ -211,7 +251,7 @@ void add_el(Entry *entry)
     if (!entry)
         return;
 
-    elog(NOTICE, "add_el");    
+    elog(NOTICE, "add_el NEW!");    
     
     int pos = find_pos();
     elog(NOTICE, "pos %ld", pos);
@@ -229,24 +269,3 @@ void add_el(Entry *entry)
         add_el_internal(entry, pos);
     }
 }
-
-/*   
-    typedef struct Entry
-    {
-        int32_t id;
-        char*   name;
-    } Entry;
-
-    typedef struct Storage 
-    {
-        LWLock       *lock;
-        size_t        store_capacity;
-        Entry        *store;
-        uint8_t      *free_space_bitmap;
-        
-        dsa_area     *dsa;
-        void         *raw_dsa_area;
-        
-        MemoryContext storage_mem_cxt;
-    } Storage;
-*/

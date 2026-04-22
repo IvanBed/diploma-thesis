@@ -33,7 +33,7 @@
     #define STORAGE_FULL -1
 
     #define STORE_CAPACITY 25
-    #define TEXT_STORE_MAX_SIZE 16384
+    #define TEXT_STORE_MAX_SIZE 1024 * 1024
 
 
     typedef struct Entry
