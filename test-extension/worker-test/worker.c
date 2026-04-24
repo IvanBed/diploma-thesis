@@ -90,6 +90,29 @@ static void test_shmem_startup()
     init_shared_latch_if_needed();
 }
 
+void attach_shmem(void)
+{
+	elog(NOTICE, "STEP 2: attach_shmem 1");  
+    MemoryContext oldcontext;
+
+	if (storage->dsa)
+		return;
+    
+    elog(NOTICE, "STEP 2: attach_shmem 2"); 
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	storage->dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
+	dsa_pin_mapping(storage->dsa);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+dsa_area *get_dsa_area_for_text(void)
+{
+	attach_shmem();
+	return storage->dsa;
+}
+
 void write_data_to_rel()
 {
     size_t ret_arr_size = sizeof(int) * storage->store_capacity;
@@ -109,6 +132,8 @@ void write_data_to_rel()
     PushActiveSnapshot(GetTransactionSnapshot());
 
     LWLockAcquire(storage->lock, LW_SHARED);
+    dsa_pointer dsa_text_pointer;
+	char	   *text = NULL;
 
     for(size_t i = 0; i < storage->store_capacity; i++)
     {
@@ -116,7 +141,9 @@ void write_data_to_rel()
         {
             StringInfoData buf;
             initStringInfo(&buf);
-            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, "TEST VAL LATCH");
+            
+            //text = dsa_get_address(get_dsa_area_for_text(), (storage->store + i)->test_text.text_pos);
+            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, "text");
             ret[i] = SPI_execute(buf.data, false, 0);
             pfree(buf.data);
         }
@@ -130,16 +157,16 @@ void write_data_to_rel()
 
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
-    dsa_area     *dsa;
-    dsa_pointer   dsa_text_pointer;
+
     for (size_t i = 0; i < storage->store_capacity; i++)
     {
         // Удаляем строку из динамической разделяемой памяти и помечаем позиции в store как свободную.
         if (ret[i] == SPI_OK_INSERT)
         {
-            /*dsa_text_pointer = storage->store[i].test_text.text_pos;
+            dsa_text_pointer = storage->store[i].test_text.text_pos;
             if(DsaPointerIsValid(dsa_text_pointer))
-                dsa_free(storage->dsa, dsa_text_pointer);*/
+                storage->free_space_bitmap[i] = FREE;
+                //dsa_free(storage->dsa, dsa_text_pointer); 
             
             storage->free_space_bitmap[i] = FREE;
         }
@@ -161,7 +188,8 @@ void worker_main(Datum main_arg)
 
     // Передает право владения лэтчем из разделяемой памяти воркеру
     OwnLatch(latch);
-
+    
+    bool is_dsa_init = false;
     for (;;)
     {
         // Ожидание будет до сигнала от основного процесса
@@ -175,7 +203,6 @@ void worker_main(Datum main_arg)
             ConfigReloadPending = false;
             ProcessConfigFile(PGC_SIGHUP);
         }
-        
         write_data_to_rel();
     }
 }

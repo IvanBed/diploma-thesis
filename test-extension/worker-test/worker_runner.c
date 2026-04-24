@@ -165,6 +165,30 @@ Datum log_print(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
+PG_FUNCTION_INFO_V1(free_storage);
+
+Datum free_storage(PG_FUNCTION_ARGS)
+{
+    dsa_area     *dsa;
+    dsa_pointer   dsa_text_pointer;
+
+    if (storage)
+    {
+        elog(NOTICE, "STORAGE FREE");  
+        
+        for (size_t i = 0; i < storage->store_capacity; i++)
+        {
+            dsa_text_pointer = storage->store[i].test_text.text_pos;
+            if(storage->dsa && DsaPointerIsValid(dsa_text_pointer))
+                dsa_free(storage->dsa, dsa_text_pointer);
+
+            storage->free_space_bitmap[i] = FREE;   
+        } 
+        elog(NOTICE, "--------------------------------------------------");       
+    } 
+    PG_RETURN_VOID();
+}
+
 void attach_shmem(void)
 {
 	elog(NOTICE, "STEP 2: attach_shmem 1");  
@@ -239,7 +263,9 @@ void add_el_internal(Entry *entry, size_t pos)
         text_buff[text_len] = 0;
         entry->test_text.text_pos = text_dsa_pointer;
     } 
-    elog(NOTICE, "STEP 4: copy entry struct into shared mem");  
+    elog(NOTICE, "STEP 4: copy entry struct into shared mem"); 
+
+    //elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area));  
     memcpy(storage->store + pos, entry, sizeof(Entry));       
     storage->free_space_bitmap[pos] = ALLOCATED;
 

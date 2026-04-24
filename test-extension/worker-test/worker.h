@@ -23,7 +23,8 @@
     #include <utils/rel.h>
     #include <utils/snapmgr.h>
     #include "utils/dsa.h"
-
+    #include "utils/memutils.h"
+    
     #include "libpq/pqsignal.h"
 
     #define TABLE_NAME "test_table"

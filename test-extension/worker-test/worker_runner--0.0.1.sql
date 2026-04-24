@@ -9,4 +9,6 @@ CREATE FUNCTION log_print() RETURNS void
      AS '/usr/lib/postgresql/16/lib/worker_runner', 'log_print'
      LANGUAGE C STRICT;
 
-     
+CREATE FUNCTION free_storage() RETURNS void
+     AS '/usr/lib/postgresql/16/lib/worker_runner', 'free_storage'
+     LANGUAGE C STRICT;     
