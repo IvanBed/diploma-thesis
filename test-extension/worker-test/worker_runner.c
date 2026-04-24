@@ -8,6 +8,8 @@ PG_MODULE_MAGIC;
 static Storage     *storage     = NULL;
 static Latch       *latch       = NULL;
 
+static dsa_area    *local_dsa   = NULL;
+
 bool full(void);
 void add_el(Entry *);
 
@@ -73,6 +75,28 @@ void init_storage_shmem_if_needed()
     LWLockRelease(AddinShmemInitLock);
 }
 
+void attach_shmem(void)
+{
+	//elog(NOTICE, "STEP 2: attach_shmem 1");  
+    MemoryContext oldcontext;
+
+	if (local_dsa)
+		return;
+    
+    //elog(NOTICE, "STEP 2: attach_shmem 2"); 
+	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+	local_dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
+	dsa_pin_mapping(local_dsa);
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+dsa_area *get_dsa_area_for_text(void)
+{
+	attach_shmem();
+	return local_dsa;
+}
 
 static void test_shmem_request()
 {
@@ -105,6 +129,17 @@ void init_worker(BackgroundWorker *worker)
     (*worker).bgw_notify_pid = 0;
     snprintf((*worker).bgw_name, BGW_MAXLEN, "worker worker %d", 1);
     snprintf((*worker).bgw_type, BGW_MAXLEN, "worker");
+}
+
+size_t dsa_get_total_size(dsa_area * area) 	
+{
+    size_t      size;
+ 
+    LWLockAcquire(area, LW_SHARED);
+    size = area->control->total_segment_size;
+    LWLockRelease(area);
+ 
+    return size;
 }
 
 void _PG_init()
@@ -154,9 +189,10 @@ Datum log_print(PG_FUNCTION_ARGS)
         elog(NOTICE, "--------------------------------------------------");
         elog(NOTICE, "capacity %ld", storage->store_capacity);
         
+        dsa_area *dsa = get_dsa_area_for_text();
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
-            char *text = dsa_get_address(storage->dsa, (storage->store + i)->test_text.text_pos);
+            char *text = dsa_get_address(dsa, (storage->store + i)->test_text.text_pos);
             if (storage->free_space_bitmap[i] == ALLOCATED)
                 elog(NOTICE, "%d %s", (storage->store + i)->id, text); 
         } 
@@ -175,41 +211,18 @@ Datum free_storage(PG_FUNCTION_ARGS)
     if (storage)
     {
         elog(NOTICE, "STORAGE FREE");  
-        
+        dsa_area *dsa = get_dsa_area_for_text();
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
             dsa_text_pointer = storage->store[i].test_text.text_pos;
-            if(storage->dsa && DsaPointerIsValid(dsa_text_pointer))
-                dsa_free(storage->dsa, dsa_text_pointer);
+            if(dsa && DsaPointerIsValid(dsa_text_pointer))
+                dsa_free(dsa, dsa_text_pointer);
 
             storage->free_space_bitmap[i] = FREE;   
         } 
         elog(NOTICE, "--------------------------------------------------");       
     } 
     PG_RETURN_VOID();
-}
-
-void attach_shmem(void)
-{
-	elog(NOTICE, "STEP 2: attach_shmem 1");  
-    MemoryContext oldcontext;
-
-	if (storage->dsa)
-		return;
-    
-    elog(NOTICE, "STEP 2: attach_shmem 2"); 
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-	storage->dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
-	dsa_pin_mapping(storage->dsa);
-
-	MemoryContextSwitchTo(oldcontext);
-}
-
-dsa_area *get_dsa_area_for_text(void)
-{
-	attach_shmem();
-	return storage->dsa;
 }
 
 int find_pos()
@@ -265,7 +278,7 @@ void add_el_internal(Entry *entry, size_t pos)
     } 
     elog(NOTICE, "STEP 4: copy entry struct into shared mem"); 
 
-    //elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area));  
+    elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area));  
     memcpy(storage->store + pos, entry, sizeof(Entry));       
     storage->free_space_bitmap[pos] = ALLOCATED;
 

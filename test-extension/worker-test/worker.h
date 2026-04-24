@@ -24,7 +24,7 @@
     #include <utils/snapmgr.h>
     #include "utils/dsa.h"
     #include "utils/memutils.h"
-    
+
     #include "libpq/pqsignal.h"
 
     #define TABLE_NAME "test_table"
@@ -54,7 +54,6 @@
         Entry        *store;
         uint8_t      *free_space_bitmap;
         
-        dsa_area     *dsa;
         void         *raw_dsa_area;
         
         MemoryContext storage_mem_cxt;

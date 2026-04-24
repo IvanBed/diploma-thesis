@@ -9,6 +9,8 @@ PG_MODULE_MAGIC;
 static Storage     *storage     = NULL;
 static Latch       *latch       = NULL;
 
+static dsa_area    *local_dsa   = NULL;
+
 void request_shmem_shared_latch()
 {
     RequestAddinShmemSpace(MAXALIGN(sizeof(Latch)));
@@ -95,14 +97,14 @@ void attach_shmem(void)
 	elog(NOTICE, "STEP 2: attach_shmem 1");  
     MemoryContext oldcontext;
 
-	if (storage->dsa)
+	if (local_dsa)
 		return;
     
     elog(NOTICE, "STEP 2: attach_shmem 2"); 
 	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-	storage->dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
-	dsa_pin_mapping(storage->dsa);
+	local_dsa = dsa_attach_in_place(storage->raw_dsa_area, NULL);
+	dsa_pin_mapping(local_dsa);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -110,7 +112,7 @@ void attach_shmem(void)
 dsa_area *get_dsa_area_for_text(void)
 {
 	attach_shmem();
-	return storage->dsa;
+	return local_dsa;
 }
 
 void write_data_to_rel()
@@ -132,7 +134,8 @@ void write_data_to_rel()
     PushActiveSnapshot(GetTransactionSnapshot());
 
     LWLockAcquire(storage->lock, LW_SHARED);
-    dsa_pointer dsa_text_pointer;
+    dsa_area    *dsa = get_dsa_area_for_text();
+    dsa_pointer  dsa_text_pointer;
 	char	   *text = NULL;
 
     for(size_t i = 0; i < storage->store_capacity; i++)
@@ -142,8 +145,8 @@ void write_data_to_rel()
             StringInfoData buf;
             initStringInfo(&buf);
             
-            //text = dsa_get_address(get_dsa_area_for_text(), (storage->store + i)->test_text.text_pos);
-            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, "text");
+            text = dsa_get_address(dsa, (storage->store + i)->test_text.text_pos);
+            appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, text);
             ret[i] = SPI_execute(buf.data, false, 0);
             pfree(buf.data);
         }
@@ -157,16 +160,14 @@ void write_data_to_rel()
 
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
-
     for (size_t i = 0; i < storage->store_capacity; i++)
     {
         // Удаляем строку из динамической разделяемой памяти и помечаем позиции в store как свободную.
         if (ret[i] == SPI_OK_INSERT)
         {
-            dsa_text_pointer = storage->store[i].test_text.text_pos;
+            dsa_text_pointer = (storage->store + i)->test_text.text_pos;
             if(DsaPointerIsValid(dsa_text_pointer))
-                storage->free_space_bitmap[i] = FREE;
-                //dsa_free(storage->dsa, dsa_text_pointer); 
+                dsa_free(dsa, dsa_text_pointer);
             
             storage->free_space_bitmap[i] = FREE;
         }
