@@ -55,7 +55,7 @@ void init_storage_shmem_if_needed()
         
         storage->store_capacity    = STORE_CAPACITY;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
-        storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
+        storage->free_space_bitmap = (uint8_t*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
 
         p += MAXALIGN(sizeof(Storage));
@@ -131,17 +131,6 @@ void init_worker(BackgroundWorker *worker)
     snprintf((*worker).bgw_type, BGW_MAXLEN, "worker");
 }
 
-size_t dsa_get_total_size(dsa_area * area) 	
-{
-    size_t      size;
- 
-    LWLockAcquire(area, LW_SHARED);
-    size = area->control->total_segment_size;
-    LWLockRelease(area);
- 
-    return size;
-}
-
 void _PG_init()
 {
 
@@ -192,7 +181,7 @@ Datum log_print(PG_FUNCTION_ARGS)
         dsa_area *dsa = get_dsa_area_for_text();
         for (size_t i = 0; i < storage->store_capacity; i++)
         {
-            char *text = dsa_get_address(dsa, (storage->store + i)->test_text.text_pos);
+            char *text = dsa_get_address(dsa, storage->store[i].test_text.text_pos);
             if (storage->free_space_bitmap[i] == ALLOCATED)
                 elog(NOTICE, "%d %s", (storage->store + i)->id, text); 
         } 
@@ -258,7 +247,7 @@ void add_el_internal(Entry *entry, size_t pos)
     elog(NOTICE, "STEP 1: get text from entry");  
     text     = entry->test_text.text_pointer;
     text_len = strlen(text);
-    elog(NOTICE, "text %s len %d", text, text_len); 
+    //elog(NOTICE, "text %s len %d", text, text_len); 
 
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
 
@@ -278,7 +267,8 @@ void add_el_internal(Entry *entry, size_t pos)
     } 
     elog(NOTICE, "STEP 4: copy entry struct into shared mem"); 
 
-    elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area));  
+    //elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area)); 
+    //elog(NOTICE, "TEST");  
     memcpy(storage->store + pos, entry, sizeof(Entry));       
     storage->free_space_bitmap[pos] = ALLOCATED;
 

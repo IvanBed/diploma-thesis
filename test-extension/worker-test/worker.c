@@ -1,6 +1,5 @@
 #include "worker.h"
 
-
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 
@@ -54,7 +53,7 @@ void init_storage_shmem_if_needed()
         
         storage->store_capacity    = STORE_CAPACITY;
         storage->store             = (Entry*) ShmemAlloc(sizeof(Entry) * STORE_CAPACITY);
-        storage->free_space_bitmap = (Entry*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
+        storage->free_space_bitmap = (uint8_t*) ShmemAlloc(sizeof(uint8_t) * STORE_CAPACITY);
         storage->lock              = &(GetNamedLWLockTranche("shmem_storage_chunk"))->lock;
 
         p += MAXALIGN(sizeof(Storage));
@@ -136,7 +135,7 @@ void write_data_to_rel()
     LWLockAcquire(storage->lock, LW_SHARED);
     dsa_area    *dsa = get_dsa_area_for_text();
     dsa_pointer  dsa_text_pointer;
-	char	   *text = NULL;
+	char	     *text = NULL;
 
     for(size_t i = 0; i < storage->store_capacity; i++)
     {
@@ -145,7 +144,7 @@ void write_data_to_rel()
             StringInfoData buf;
             initStringInfo(&buf);
             
-            text = dsa_get_address(dsa, (storage->store + i)->test_text.text_pos);
+            text = dsa_get_address(dsa, storage->store[i].test_text.text_pos);
             appendStringInfo(&buf, "INSERT INTO %s (id, name) VALUES (%d, '%s')", TABLE_NAME, storage->store[i].id, text);
             ret[i] = SPI_execute(buf.data, false, 0);
             pfree(buf.data);
