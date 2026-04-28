@@ -10,8 +10,7 @@ static Latch       *latch       = NULL;
 
 static dsa_area    *local_dsa   = NULL;
 
-bool full(void);
-void add_el(Entry *);
+bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa);
 
 void request_shmem_shared_latch()
 {
@@ -156,6 +155,8 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     int32_t id       = DatumGetInt32(PG_GETARG_DATUM(0));
     const char* name = TextDatumGetCString(PG_GETARG_DATUM(1));
     
+    dsa_area *dsa = get_dsa_area_for_text();
+
     elog(NOTICE, "set_store_entry");
     elog(NOTICE, "id  %d", id);  
     elog(NOTICE, "name  %s", name); 
@@ -163,7 +164,8 @@ Datum set_store_entry(PG_FUNCTION_ARGS)
     Entry entry;
     entry.id   = id;
     entry.test_text.text_pointer = name;
-    add_el(&entry);
+
+    add_el(&entry, storage, dsa);
 
     PG_RETURN_VOID();
 }
@@ -214,87 +216,3 @@ Datum free_storage(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
-int find_pos()
-{
-    int res_pos = STORAGE_FULL;
-    LWLockAcquire(storage->lock, LW_SHARED);
-    for (size_t i = 0; i < storage->store_capacity; i++)
-    {
-        if (storage->free_space_bitmap[i] == FREE)
-        {
-            res_pos = (int) i;
-            break;
-        }
-    }
-    LWLockRelease(storage->lock);
-    return res_pos;
-}
-
-void add_el_internal(Entry *entry, size_t pos)
-{
-    if (!entry)
-    {
-        return;
-    }
-
-    char	   *text_buff;
-    dsa_area   *text_dsa_area;
-    dsa_pointer text_dsa_pointer;
-    
-    size_t      text_len;
-    char       *text;
-    
-    elog(NOTICE, "STEP 1: get text from entry");  
-    text     = entry->test_text.text_pointer;
-    text_len = strlen(text);
-    //elog(NOTICE, "text %s len %d", text, text_len); 
-
-    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
-
-    elog(NOTICE, "STEP 2: init dsa area");  
-	text_dsa_area = get_dsa_area_for_text();
-
-    elog(NOTICE, "STEP 2: dsa_allocate_extended");  
-    text_dsa_pointer = dsa_allocate_extended(text_dsa_area, text_len + 1,  DSA_ALLOC_ZERO);
-    elog(NOTICE, "STEP 2: end"); 
-    if (DsaPointerIsValid(text_dsa_pointer))
-    {
-        elog(NOTICE, "STEP 3: store text in dsa area");  
-        text_buff = dsa_get_address(text_dsa_area, text_dsa_pointer);
-        memcpy(text_buff, text, text_len);
-        text_buff[text_len] = 0;
-        entry->test_text.text_pos = text_dsa_pointer;
-    } 
-    elog(NOTICE, "STEP 4: copy entry struct into shared mem"); 
-
-    //elog(NOTICE, "MEM INFO: cur mem %ld",  dsa_get_total_size(text_dsa_area)); 
-    //elog(NOTICE, "TEST");  
-    memcpy(storage->store + pos, entry, sizeof(Entry));       
-    storage->free_space_bitmap[pos] = ALLOCATED;
-
-    LWLockRelease(storage->lock);
-}
-
-void add_el(Entry *entry)
-{
-    if (!entry)
-        return;
-
-    elog(NOTICE, "add_el NEW!");    
-    
-    int pos = find_pos();
-    elog(NOTICE, "pos %ld", pos);
-    if (pos != STORAGE_FULL)
-    {
-        add_el_internal(entry, pos);
-    }
-    else
-    {
-        elog(NOTICE, "wait for worker");    
-        elog(NOTICE, "SetLatch"); 
-        SetLatch(latch);
-        // костыл для теста, поменять
-        while ((pos = find_pos()) == STORAGE_FULL) {}
-        add_el_internal(entry, pos);
-    }
-}

@@ -141,6 +141,7 @@ void worker_main(Datum main_arg)
             ProcessConfigFile(PGC_SIGHUP);
         }
         write_data_to_rel();
+        storage_free_all();
     }
 }
 

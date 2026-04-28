@@ -1,6 +1,20 @@
 #ifndef STORAGE_H
 #define STORAGE_H
 
+    #include "postgres.h"
+    #include "fmgr.h"
+    #include "miscadmin.h"
+
+    #include "storage/lwlock.h"
+
+    #include "utils/builtins.h"
+    #include "utils/memutils.h"
+    #include "utils/dsa.h"
+
+    #include "nodes/pg_list.h"
+    #include "nodes/memnodes.h"
+
+
     #define TABLE_NAME "test_table"
 
     #define FREE 0 
@@ -32,5 +46,6 @@
         
         MemoryContext storage_mem_cxt;
     } Storage;
+
 
 #endif
