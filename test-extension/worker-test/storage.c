@@ -1,6 +1,8 @@
 
 #include "storage.h"
 
+PG_MODULE_MAGIC;
+
 static int find_pos(Storage *storage)
 {
     int res_pos = STORAGE_FULL;
@@ -60,7 +62,7 @@ static void add_el_internal(Entry *entry, size_t pos, Storage *storage, dsa_area
     LWLockRelease(storage->lock);
 }
 
-bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa)
+PGDLLEXPORT bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa)
 {
     if (!entry)
         return false;
@@ -80,7 +82,7 @@ bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa)
     }
 }
 
-void cleanup_storage(Storage *storage, dsa_area *local_dsa, int const *ret)
+PGDLLEXPORT void cleanup_storage(Storage *storage, dsa_area *local_dsa, int const *ret)
 {
     dsa_pointer dsa_text_pointer;
     LWLockAcquire(storage->lock, LW_EXCLUSIVE);
