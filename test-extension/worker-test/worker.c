@@ -50,6 +50,7 @@ dsa_area *get_dsa_area_for_text(void)
 	return local_dsa;
 }
 
+// Подумать про MemoryContext, имеет ли смысл или нет
 void write_data_to_rel()
 {
     MemoryContext oldcontext;
@@ -96,8 +97,7 @@ void write_data_to_rel()
     CommitTransactionCommand();
     cleanup_storage(storage, dsa, ret);
     
-    //pfree(ret);
-
+    pfree(ret);
     MemoryContextSwitchTo(oldcontext);
 }
 
