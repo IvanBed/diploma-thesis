@@ -1,10 +1,13 @@
 all: worker worker_runner
 
-worker_runner:
+worker_runner: storage
 	$(MAKE) -f Makefile.worker_runner USE_PGXS=1 install
 
-worker:
+worker: storage
 	$(MAKE) -f Makefile.worker USE_PGXS=1 install
+
+storage:
+	$(MAKE) -f Makefile.storage USE_PGXS=1 install
 
 clean: clean_worker clean_worker_runner storage
 

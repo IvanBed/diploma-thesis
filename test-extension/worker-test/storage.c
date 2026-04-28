@@ -1,7 +1,7 @@
 
 #include "storage.h"
 
-int find_pos(Storage *storage)
+static int find_pos(Storage *storage)
 {
     int res_pos = STORAGE_FULL;
     LWLockAcquire(storage->lock, LW_SHARED);
@@ -17,7 +17,7 @@ int find_pos(Storage *storage)
     return res_pos;
 }
 
-void add_el_internal(Entry *entry, size_t pos, Storage *storage, dsa_area *local_dsa)
+static void add_el_internal(Entry *entry, size_t pos, Storage *storage, dsa_area *local_dsa)
 {
     if (!entry)
     {

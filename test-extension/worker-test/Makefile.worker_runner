@@ -1,7 +1,10 @@
 EXTENSION = worker_runner
 MODULE_big = worker_runner
 DATA = worker_runner--0.0.1.sql
-OBJS = worker_runner.o storage.o
+OBJS = worker_runner.o
+
+SHLIB_LINK = -L.-lstorage
+
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

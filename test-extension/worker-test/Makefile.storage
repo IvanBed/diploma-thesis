@@ -1,8 +1,5 @@
-MODULE_big = worker
-OBJS = worker.o
-
-SHLIB_LINK = -L.-lstorage
-
+MODULE_big = storage
+OBJS = storage.o
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

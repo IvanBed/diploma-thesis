@@ -52,8 +52,10 @@ dsa_area *get_dsa_area_for_text(void)
 
 void write_data_to_rel()
 {
+    MemoryContext oldcontext;
     size_t ret_arr_size = sizeof(int) * storage->store_capacity;
     
+    oldcontext = MemoryContextSwitchTo(TopMemoryContext);
     int *ret            = (int*) palloc(ret_arr_size);
 
     if (!ret)
@@ -92,26 +94,11 @@ void write_data_to_rel()
     PopActiveSnapshot();
     SPI_finish();
     CommitTransactionCommand();
-
-    /*LWLockAcquire(storage->lock, LW_EXCLUSIVE);
-    
-    for (size_t i = 0; i < storage->store_capacity; i++)
-    {
-        // Удаляем строку из динамической разделяемой памяти и помечаем позиции в store как свободную.
-        if (ret[i] == SPI_OK_INSERT)
-        {
-            dsa_text_pointer = (storage->store + i)->test_text.text_pos;
-            if(DsaPointerIsValid(dsa_text_pointer))
-                dsa_free(dsa, dsa_text_pointer);
-            
-            storage->free_space_bitmap[i] = FREE;
-        }
-    }
-
-    LWLockRelease(storage->lock);
-    */
     cleanup_storage(storage, dsa, ret);
-    pfree(ret); 
+    
+    //pfree(ret);
+
+    MemoryContextSwitchTo(oldcontext);
 }
 
 PGDLLEXPORT void worker_main(Datum main_arg)
