@@ -23,7 +23,8 @@
 
     #define STORE_CAPACITY 25
     #define TEXT_STORE_MAX_SIZE 1024 * 1024
-
+    
+    #define SPI_OK_INSERT 7
 
     typedef struct Entry
     {
@@ -47,5 +48,7 @@
         MemoryContext storage_mem_cxt;
     } Storage;
 
+    bool add_el(Entry *, Storage *, dsa_area *);
+    void cleanup_storage(Storage *, dsa_area *, int const *);
 
 #endif

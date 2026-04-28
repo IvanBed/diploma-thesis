@@ -10,8 +10,6 @@ static Latch       *latch       = NULL;
 
 static dsa_area    *local_dsa   = NULL;
 
-bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa);
-
 void request_shmem_shared_latch()
 {
     RequestAddinShmemSpace(MAXALIGN(sizeof(Latch)));

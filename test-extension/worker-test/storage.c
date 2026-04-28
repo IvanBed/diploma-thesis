@@ -79,3 +79,25 @@ bool add_el(Entry *entry, Storage *storage, dsa_area *local_dsa)
         return false;
     }
 }
+
+void cleanup_storage(Storage *storage, dsa_area *local_dsa, int const *ret)
+{
+    dsa_pointer dsa_text_pointer;
+    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+    
+    for (size_t i = 0; i < storage->store_capacity; i++)
+    {
+        // Удаляем строку из динамической разделяемой памяти и помечаем позиции в store как свободную.
+        if (ret[i] == SPI_OK_INSERT)
+        {
+            dsa_text_pointer = (storage->store + i)->test_text.text_pos;
+            if(DsaPointerIsValid(local_dsa))
+                dsa_free(local_dsa, dsa_text_pointer);
+            
+            storage->free_space_bitmap[i] = FREE;
+        }
+    }
+
+    LWLockRelease(storage->lock);
+
+}

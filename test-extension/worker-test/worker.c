@@ -93,7 +93,7 @@ void write_data_to_rel()
     SPI_finish();
     CommitTransactionCommand();
 
-    LWLockAcquire(storage->lock, LW_EXCLUSIVE);
+    /*LWLockAcquire(storage->lock, LW_EXCLUSIVE);
     
     for (size_t i = 0; i < storage->store_capacity; i++)
     {
@@ -109,11 +109,12 @@ void write_data_to_rel()
     }
 
     LWLockRelease(storage->lock);
-    
+    */
+    cleanup_storage(storage, dsa, ret);
     pfree(ret); 
 }
 
-void worker_main(Datum main_arg)
+PGDLLEXPORT void worker_main(Datum main_arg)
 {
     pqsignal(SIGHUP, SignalHandlerForConfigReload);
     pqsignal(SIGTERM, die);
@@ -141,7 +142,7 @@ void worker_main(Datum main_arg)
             ProcessConfigFile(PGC_SIGHUP);
         }
         write_data_to_rel();
-        storage_free_all();
+
     }
 }
 

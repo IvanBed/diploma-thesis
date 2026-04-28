@@ -1,0 +1,5 @@
+MODULE_big = worker
+OBJS = worker.o storage.o
+PG_CONFIG = pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+include $(PGXS)
